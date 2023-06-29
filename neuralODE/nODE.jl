@@ -14,19 +14,44 @@ begin
 	using DataFrames
 	using OrdinaryDiffEq
 	using Plots
+	using PlutoUI
+	using BenchmarkTools
 end
-
-# ╔═╡ 2bd357ae-4a36-4d77-b382-07ac91111297
-celsius2kelvin(c) = c + 273.15
 
 # ╔═╡ 535fd607-443c-487d-90b5-e187812ba6ce
 md""""
-Training inzwischen viel schneller Änderung.
-Workbook auf geteilt eines mit nODE und eines mit PINN.
-zusätzlich Bibleotheken nicht in lokal gespeichten, sondern mit Pluto gemanagt.
+# Training neural ODE
 
-Aktuelle Versionen der Bibleothek als zuvor!?
+Neurales ODE in Anlehnung an eine einfache differentielle Gleichung (ODE).
+Wobei die differenzelle Änderungen in einem System beschreibt. Durch Eingabe der
+Startwerte kann so der tatsächliche Graph abgebildert werden.
+Anstelle eines Solvers, wo einzelne Parameter des ODE angepasst werden, soll ein neurales Netzwerk trainiert werden, dass die ODE abbildet.
+
+Training eines NN (Dense).
+ 1) 2->16, Aktivierungsfunktion tanh,
+ 2) 16->2, Aktivierungsfunktion linear.
+
+Eingabe in das Training: Zeitpunkte zu denen Gemessene Punkte mit trainierten verglichen werden sollen.
+
+
+Die zwei Knoten in Eingabe und Ausgabe Layer entsprechen den Temperaturen an den 
+gegeben Temperatursensoren des tclab, während die erste Heizquelle zyklisch aufgeheizt wird.
+Das heißt, beide Sensoren werden zyklisch erhitzt. Sensor 1, stärker als Sensor 2.
+Sensor 2 ist im Aufheizen und Abkühlen im Vergleich zu Sensor 1 leicht verzögert.
+
+
+Es soll ein neurales ODE mit dem Netzwerk angelernt werden. 
+Das Netz soll die Änderungen des Verlauf des Temperaturen Vorhersagen.
+
+Für die Vorhersage wird daher die Starttemperatur benötigt.
+
 """
+
+# ╔═╡ 7c16f638-efe6-46a9-920a-fd183ebe82f2
+TableOfContents()
+
+# ╔═╡ 2bd357ae-4a36-4d77-b382-07ac91111297
+celsius2kelvin(c) = c + 273.15
 
 # ╔═╡ f843ded8-a0ec-444b-8930-cb28970fc263
 function prepare_dataframe(data_frame_path)
@@ -38,8 +63,10 @@ function prepare_dataframe(data_frame_path)
     _df.start_time =  start_times_stat[trunc.(Int, _df.run).+1, :time]
     _df.duration = _df.time - _df.start_time
     _df.T1 = _df.T1 .|> celsius2kelvin
-    _df.T1prev = prepend!(_df.T1[1:end-1], _df.T1[1], )
+	_df.T2 = _df.T2 .|> celsius2kelvin
     _df.Column1 = _df.Column1 .+ 1
+	_df.run = _df.run .+ 1
+	
     return _df
 end
 
@@ -52,66 +79,93 @@ end
 # ╔═╡ 47dfcfa2-de22-4baa-99b3-703c7b121a11
 begin
 	# define data for the ODE
-	y0 = Float64[294.70,]
 	
-	end_point = 1800
-	tspan = (0.0, end_point)
-	tsteps = range(tspan[1], tspan[2], length=60)
+	end_point = 3600;
+	tspan = (0.0, end_point);
+	tsteps = range(tspan[1], tspan[2], length=120);
 	
 	# seconds since start
-	t = heating_df[1:end_point, :time] .- heating_df.start_time[1]
-	u = heating_df[1:end_point, :Q1]
-	y = heating_df[1:end_point, :T1]
+	t = heating_df[1:end_point, :time] .- heating_df.start_time[1];
+	u = heating_df[1:end_point, :Q1];
+	T₁ = heating_df[1:end_point, :T1];
+	T₂ = heating_df[1:end_point, :T2];
 end
 
 # ╔═╡ e392e5d6-2a67-4af5-a3c6-195147f04068
 begin
 	# Interpoliere the u, y
-	u_t = LinearInterpolation(u, t)
-	y_t = LinearInterpolation(y, t)
+	u_t = ConstantInterpolation(u, t);
+	T₁_t = LinearInterpolation(T₁, t);
+	T₂_t = LinearInterpolation(T₂, t);
+	T0 = [T₁_t(0),T₂_t(0)]
 	
-	ode_data = Array(y_t(tsteps))
+	ode_data = Array(T₁_t(tsteps)), Array(T₂_t(tsteps));
 end
 
 # ╔═╡ 9a0b9e45-5d23-441b-a1b8-d7ceaa6efc0f
 begin
-	# mgl. durch Interpolation so langsam im Training?
-	dudt = Flux.Chain(x -> u_t.(x),  # wie Verallgemeinderung auf andere u_t
-	                  Flux.Dense(1=>16, tanh),
-	                  Flux.Dense(16=>1)) |> f64
+	# durch Interpolation langsam im Training
+	dudt = Flux.Chain(# x -> u_t.(x),  # wie Verallgemeinderung auf andere u_t
+	                  Flux.Dense(2=>64, tanh),
+	                  Flux.Dense(64=>2)) |> f64
 	
-	n_ode = NeuralODE(dudt, tspan, Tsit5(), saveat=tsteps, reltol=1e-7, abstol=1e-9)
+	n_ode = NeuralODE(dudt, tspan, DP5(), saveat=tsteps, reltol=1e-7, abstol=1e-9)
 	
-	y_predict_before = n_ode(y0)
-	ps = Flux.params(n_ode)
+	y_predict_before = n_ode(T0)
+	ps = Flux.params(n_ode.p)
 			
 	function predict_n_ode()
-	      n_ode(y0)
+	      n_ode(T0)
 	end
 	
-	loss_n_ode() = sum(abs2,ode_data .- transpose(predict_n_ode()))
+	loss_n_ode() = sum(abs2,ode_data[1] .- n_ode(T0)'[:, 1]) + 	   sum(abs2,ode_data[2] .- n_ode(T0)'[:, 2])
+
+	
 end
 
 # ╔═╡ 8dafeaef-cacf-4076-b7dc-3b96c8544ec2
 begin
-	opt_n_ode = ADAM(0.0001)
-	data = Iterators.repeated((), 1000)  # training dauert sehr lange, daher interator r
-	Flux.train!(loss_n_ode, ps, data, opt_n_ode)
+	
+	η = 1e-4
+	opt_n_ode = ADAM(η)
+	epoches = 10_000
+
+	loss_vector = Vector{Float64}()
+	callback() = push!(loss_vector, loss_n_ode())
+	
+	data = Iterators.repeated((), epoches)
+	
+	Flux.train!(loss_n_ode, ps, data, opt_n_ode, cb=callback)
 end
+
+# ╔═╡ aa673a75-4992-4fb6-8125-bb92c92a2469
+plot(1:epoches .|> log10, loss_vector .|> log10, label="mse log-log", title="Loss", xlabel = "Log(Epoche)", ylabel = "Loss log(mse)",)
 
 # ╔═╡ b6487906-4e75-4a47-89fa-47455fa01d98
 begin
-	y_predict_after = n_ode(y0)
+	y_predict_after = n_ode(T0)
 	
 	# plot result	
-	p_n_ode = plot(tsteps, ode_data, label="T1 °C", mc=:red)
-	# scatter!(p_n_ode, y_predict_before, label="before training T1 °C", mc=:green)
-	scatter!(p_n_ode, y_predict_after, label="predicted T °C", mc=:blue)
+	p_node = plot(tsteps, ode_data[1], label="T1 °C", lc=:red, xlabel = "Epoche", ylabel = "Loss (mse)",)
+	plot!(p_node, tsteps, ode_data[2], label="T2 °C", lc=:green)
+	scatter!(p_node, tsteps, y_predict_after[1, :], label="predicted T1 °C", mc=:red)
+	scatter!(p_node, tsteps, y_predict_after[2, :], label="predicted T2 °C", mc=:green)
 end
+
+# ╔═╡ d1874dc6-a3f8-47fc-98a6-e43848101c21
+md"""
+Beim Training mit zwei Temperaturkurven ist der Verlauf des Losses glatter als, wenn nur ein Sensor angelernt wird.
+Der Loss nimmt bis zu 1000 Zyklen ab und stackniert hiernach.
+
+Die Oszilation der Temperaturen beim Heizen und Abkühlen konnte nicht nachgebildet werden.
+
+Die Der Prozentsatz der Intensität der Heizung wird, testweise mit Interpolation als erste Layer hinzugefügt.  Hierfür wurde eine ConstantInterpolation gewählt, da diese leicht schneller ist, als die Linear und bei den Wertebereich [0, 100] geringere Fehler machen sollte.
+"""
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
 [deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 DataInterpolations = "82cc6244-b520-54b8-b5a6-8a565e85f1d0"
@@ -119,8 +173,10 @@ DiffEqFlux = "aae7a2af-3d4f-5e19-a356-7da93b79d9d0"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 
 [compat]
+BenchmarkTools = "~1.3.2"
 CSV = "~0.10.11"
 DataFrames = "~1.5.0"
 DataInterpolations = "~4.0.1"
@@ -128,15 +184,16 @@ DiffEqFlux = "~2.0.0"
 Flux = "~0.13.16"
 OrdinaryDiffEq = "~6.53.1"
 Plots = "~1.38.16"
+PlutoUI = "~0.7.51"
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000002
 PLUTO_MANIFEST_TOML_CONTENTS = """
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.9.0"
+julia_version = "1.9.1"
 manifest_format = "2.0"
-project_hash = "ca47cd3dc1bc4a620d620ee311be9f1bce6bba82"
+project_hash = "6bb2998c511b596d949c9714967bf404f92887f8"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "dcfdf328328f2645531c4ddebf841228aef74130"
@@ -152,6 +209,12 @@ weakdeps = ["ChainRulesCore"]
 
     [deps.AbstractFFTs.extensions]
     AbstractFFTsChainRulesCoreExt = "ChainRulesCore"
+
+[[deps.AbstractPlutoDingetjes]]
+deps = ["Pkg"]
+git-tree-sha1 = "8eaf9f1b4921132a4cff3f36a1d9ba923b14a481"
+uuid = "6e696c72-6542-2067-7265-42206c756150"
+version = "1.1.4"
 
 [[deps.AbstractTrees]]
 git-tree-sha1 = "faa260e4cb5aba097a73fab382dd4b5819d8ec8c"
@@ -271,6 +334,12 @@ uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 git-tree-sha1 = "aebf55e6d7795e02ca500a689d326ac979aaf89e"
 uuid = "9718e550-a3fa-408a-8086-8db961cd8217"
 version = "0.1.1"
+
+[[deps.BenchmarkTools]]
+deps = ["JSON", "Logging", "Printf", "Profile", "Statistics", "UUIDs"]
+git-tree-sha1 = "d9a9701b899b30332bbcb3e1679c41cce81fb0e8"
+uuid = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+version = "1.3.2"
 
 [[deps.BitFlags]]
 git-tree-sha1 = "43b1a4a8f797c1cddadf60499a8a077d4af2cd2d"
@@ -952,6 +1021,24 @@ git-tree-sha1 = "0ec02c648befc2f94156eaef13b0f38106212f3f"
 uuid = "34004b35-14d8-5ef3-9330-4cdb6864b03a"
 version = "0.3.17"
 
+[[deps.Hyperscript]]
+deps = ["Test"]
+git-tree-sha1 = "8d511d5b81240fc8e6802386302675bdf47737b9"
+uuid = "47d2ed2b-36de-50cf-bf87-49c2cf4b8b91"
+version = "0.0.4"
+
+[[deps.HypertextLiteral]]
+deps = ["Tricks"]
+git-tree-sha1 = "c47c5fa4c5308f27ccaac35504858d8914e102f9"
+uuid = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
+version = "0.9.4"
+
+[[deps.IOCapture]]
+deps = ["Logging", "Random"]
+git-tree-sha1 = "d75853a0bdbfb1ac815478bacd89cd27b550ace6"
+uuid = "b5f81e59-6552-4d32-b1f0-c071b021bf89"
+version = "0.2.3"
+
 [[deps.IRTools]]
 deps = ["InteractiveUtils", "MacroTools", "Test"]
 git-tree-sha1 = "eac00994ce3229a464c2847e956d77a2c64ad3a5"
@@ -1283,6 +1370,11 @@ git-tree-sha1 = "4b030477cb15d6d123ec39473520f1ab086f6ff0"
 uuid = "bb33d45b-7691-41d6-9220-0943567d0623"
 version = "0.1.4"
 
+[[deps.MIMEs]]
+git-tree-sha1 = "65f28ad4b594aebe22157d6fac869786a255b7eb"
+uuid = "6c6e2e6c-3030-632d-7369-2d6c69616d65"
+version = "0.1.4"
+
 [[deps.MLStyle]]
 git-tree-sha1 = "bc38dff0548128765760c79eb7388a4b37fae2c8"
 uuid = "d8e11817-5142-5d16-987a-aa16d5891078"
@@ -1553,6 +1645,12 @@ version = "1.38.16"
     ImageInTerminal = "d8c32880-2388-543b-8c61-d9f865259254"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
+[[deps.PlutoUI]]
+deps = ["AbstractPlutoDingetjes", "Base64", "ColorTypes", "Dates", "FixedPointNumbers", "Hyperscript", "HypertextLiteral", "IOCapture", "InteractiveUtils", "JSON", "Logging", "MIMEs", "Markdown", "Random", "Reexport", "URIs", "UUIDs"]
+git-tree-sha1 = "b478a748be27bd2f2c73a7690da219d0844db305"
+uuid = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+version = "0.7.51"
+
 [[deps.PoissonRandom]]
 deps = ["Random"]
 git-tree-sha1 = "a0f1159c33f846aa77c3f30ebbc69795e5327152"
@@ -1619,6 +1717,10 @@ version = "2.2.4"
 [[deps.Printf]]
 deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+
+[[deps.Profile]]
+deps = ["Printf"]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 
 [[deps.ProgressLogging]]
 deps = ["Logging", "SHA", "UUIDs"]
@@ -2382,7 +2484,7 @@ version = "0.15.1+0"
 [[deps.libblastrampoline_jll]]
 deps = ["Artifacts", "Libdl"]
 uuid = "8e850b90-86db-534c-a0d3-1478176c7d93"
-version = "5.7.0+0"
+version = "5.8.0+0"
 
 [[deps.libfdk_aac_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -2432,15 +2534,18 @@ version = "1.4.1+0"
 """
 
 # ╔═╡ Cell order:
+# ╟─535fd607-443c-487d-90b5-e187812ba6ce
 # ╠═35e0b9f0-0a22-11ee-2878-bd28d19d083b
+# ╟─7c16f638-efe6-46a9-920a-fd183ebe82f2
 # ╠═2bd357ae-4a36-4d77-b382-07ac91111297
-# ╠═535fd607-443c-487d-90b5-e187812ba6ce
 # ╠═f843ded8-a0ec-444b-8930-cb28970fc263
 # ╠═eb9976e5-9ba6-4698-93f5-57c3cec414a2
 # ╠═47dfcfa2-de22-4baa-99b3-703c7b121a11
 # ╠═e392e5d6-2a67-4af5-a3c6-195147f04068
 # ╠═9a0b9e45-5d23-441b-a1b8-d7ceaa6efc0f
 # ╠═8dafeaef-cacf-4076-b7dc-3b96c8544ec2
+# ╠═aa673a75-4992-4fb6-8125-bb92c92a2469
 # ╠═b6487906-4e75-4a47-89fa-47455fa01d98
+# ╟─d1874dc6-a3f8-47fc-98a6-e43848101c21
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
