@@ -11,7 +11,30 @@ begin
 	using StatsPlots
 	using NLsolve
 	using Flux
+	using JLD2
 	using RollingFunctions
+	using PlutoUI
+	using StatsBase
+	using Random
+end
+
+# ╔═╡ d8760ed7-947f-4a3c-be31-08f67020e769
+md"""
+# Physically Informed Neural Network (PINN)
+"""
+
+# ╔═╡ 993eda49-5f21-4368-94a6-4801f949a97b
+md"""
+##  Laden und Aufbereitung der Messdaten.
+"""
+
+# ╔═╡ 8733e584-78c6-41c4-9f30-e86ada17fe8f
+TableOfContents()
+
+# ╔═╡ 5072d3c3-1963-4d3e-8b04-ec848d005996
+begin
+	rng = Random.default_rng()
+	Random.seed!(1234)
 end
 
 # ╔═╡ ed1920f6-e175-4032-9f8b-eb26a49ea193
@@ -20,63 +43,191 @@ celsius2kelvin(c) = c + 273.15
 # ╔═╡ bf2bea30-98a5-47f4-aa2b-108e88eac174
 function prepare_dataframe(data_frame_path)
 
-    _df = DataFrame(CSV.File(data_frame_path))
+    _df = DataFrame(CSV.File(data_frame_path));
+    start_times_stat = unique(_df, :run);
 
-    start_times_stat = unique(_df, :run)
+    _df.start_time =  start_times_stat[trunc.(Int, _df.run).+1, :time];
+    _df.duration = _df.time - _df.start_time;
+	
+    _df.T1 = _df.T1 .|> celsius2kelvin;
+	_df.T2 = _df.T2 .|> celsius2kelvin;
+	
+    _df.Column1 = _df.Column1 .+ 1;
+	_df.run = _df.run .+ 1;
+	_df.global_duration  = _df.time .- _df.time[1];
+	
+	_df.dT1 = prepend!([0.0, ], diff(_df.T1))
+	_df.dT2 = prepend!([0.0, ], diff(_df.T2))
+	_df.dt = prepend!([0.0, ], diff(_df.time))
 
-    _df.start_time =  start_times_stat[trunc.(Int, _df.run).+1, :time]
-    _df.duration = _df.time - _df.start_time
-    _df.T1 = _df.T1 .|> celsius2kelvin
-    _df.T1prev = prepend!(_df.T1[1:end-1], _df.T1[1], )
-    _df.Column1 = _df.Column1 .+ 1
-    return _df
+	_df.dT1dt = _df.dT1  ./ _df.dt
+	_df.dT2dt = _df.dT2  ./ _df.dt
+
+	# fill the delta for the prepended value
+	replace!(_df.dT1dt, NaN => 0)  
+	replace!(_df.dT2dt, NaN => 0)
+	
+    return _df;
 end
 
 # ╔═╡ 12487f1f-4209-443f-945a-8c85a0191aac
 begin
-	heating_df_path = joinpath(@__DIR__, "measurements_heating_and_cooling.csv")
-	heating_df = prepare_dataframe(heating_df_path)
-	heating_curves  =  heating_df |> Matrix
-
+	heating_df_path = joinpath(@__DIR__, "measurements_heating_and_cooling.csv");
+	heating_df = prepare_dataframe(heating_df_path);
+	heating_curves  =  heating_df |> Matrix;
 end
+
+# ╔═╡ 95e49920-3c3b-4467-914a-9a93714cc9de
+heating_df
 
 # ╔═╡ 0dd3c3d4-3758-4430-a403-96b49a42d44c
 md"""
 Anzeige des Verlaufes der Heizkurven.
 
-Die Messpunkte werden wurden alle 1.1 s bis 1.3 s genommen. Zeitpunkte sind als Timestamps abgespeichert, die Temperatur wirde gemessen in °C und Kelvin umgewandelt.
-Anzeige von Punkten mit erster Ableitung und zweiter Ableitung null des rollenden Mittelwertes 
+Die Messpunkte werden wurden alle 1.1 s bis 1.3 s genommen (Dauer des Messens, Ablagen +  1 s). Zeitpunkte sind als Timestamps abgespeichert, die Temperatur wird gemessen in °C und Kelvin umgewandelt.
+
+Der Temperatursensor hat einen typischen Messfehler von 1 K und einen maximalen Fehler von 3 K.
+Der höchste gemessene Temperaturanstieg war 1.6 Kelvin pro Sekunde, der Höchste Abfall -2.4 Kelivin pro Sekunde.
+Aktuell wird eine Batchgröße von 64 gewählt.
+
+Für den physikalischen Loss werden max(30, Batchgröße) Messpunkte aus dem ersten und fünften Lauf zufällig ausgewählt. Die Wahrscheinlichkeit der Auswahl ist proprotional Differenzenquotienten des rollenden Mittelwerts mit Fensterbreite 10. 
+Trainiert wird auf der ersten Hälfte des Datensatzes. Daher wird der physikalische Loss verstärkt am Ende und Anfang der Zeitskala berechnet.
+Da der Loss für jeden Batch bestimmt wird, werden pro Batch der physikalische Loss, und der datengestüzte Loss berechnet. Daher ist ein Anpassungsfaktor des datengestützen Loss und des physikalischen Loss abhängig von der Batchgröße nötig. Deswegen ist die Größe des Testdatensatzes für den physikalischen Loss abhnägnig von der Batchgröße. Online eine Feinanpassung zu ermöglichen kann nützlich sein.
+Es wurde ein Korrekturfaktor in die physikalischen Lossfunktionen eingebaut, der Erfahrungsgemäß die **Startwerte**  der physkalischen Lossfunktionen der MSE anpasst. Wegen zufälliger Initialisierung der Layerparameter, kann es zu leichten Abweichungen kommen.
 """
+
+# ╔═╡ 1a2337f0-bede-4d7d-8fdb-125406dbb703
+md"""
+## Default Parameter
+"""
+
+# ╔═╡ 90fa8c5e-e048-4133-b8d3-89116bab7ae4
+begin
+	epochs = 10_000
+	η = 1e-4;
+
+	train_mask = 1: Int.(length(heating_df.T1)//2);
+
+	x_full_df = heating_df[:,[:global_duration]];
+	x_full_m = x_full_df |> Matrix;
+	x_full_m  =  [x for x in eachrow(x_full_m)];
+end
+
+# ╔═╡ cf7f7ede-39d8-4ab3-b604-6b076e14c978
+begin
+	batchsize = 64
+	train_df = heating_df[train_mask, :];
+	x_train_m = train_df[:,[:global_duration]] |> Matrix;
+
+	y_train = train_df[:, [:T1]] |> Matrix
+
+	loader = Flux.DataLoader((data=x_train_m', label=y_train'), batchsize=batchsize, shuffle=true);
+end
 
 # ╔═╡ 6a9e72c0-60de-44b4-ab2a-dcf4c6bd2138
 begin
-	p1 = @df heating_df plot(:time, [:T1 ], group = Int.(heating_df.run) .+ 1, legend = :topright,
-		xlabel = "time ∖s", ylabel = "T  ∖°C",
-		title = "Heating Curves", lw = 4, fmt = :png,
+	p1 = @df heating_df plot(:global_duration, [:T1 ],
+		group = Int.(heating_df.run), 
+		legend = :topright,
+		xlabel = "time ∖s", 
+		ylabel = "T  ∖°C",
+		title = "Heating Curves", 
+		lw = 4, 
+		fmt = :png,
 		palette=cgrad(:viridis, rev=true, categorical = true))
 
+	t =  heating_df.run .∈ Ref([1, 2, 3, 4, 5])
+	dT₁ = heating_df.T1[t] |> (y -> runmean(y, 10)) |> diff |> (y -> prepend!([0.0, ], y))
+	rowsΔ = StatsBase.sample(heating_df.Column1[t], Weights(abs.(dT₁)), maximum([30, batchsize]))
+	T1Δ = heating_df.T1[rowsΔ]
+	tΔ = heating_df.global_duration[rowsΔ]
+
+	scatter!(p1, tΔ, T1Δ, label="phy. Loss Samples", mc=:red);
+
+
+end
+
+# ╔═╡ 9d979f43-e5bb-47c9-90d2-e6194483e8f3
+md"""
+Die Netze sind zwar durch mit rein zufälligen Werten initialisiert. Beginnen dabei aber dennoch mit den selben Startparametern, da Parameter für das PINN mittels DeepCopy aus dem Netz für das klassische MLP kopiert wurden.
+"""
+
+# ╔═╡ c4d1c1d8-8fa8-441c-9713-9560c12ad2e9
+begin
+	NN = Chain(
+		Dense(1 => 32, tanh),
+		Dense(32 => 32, tanh),
+		Dense(32 => 1)
+	) |> f64;
+
+	NN_transfer = deepcopy(NN);
+	NN_fopdt = deepcopy(NN);
+
+end
+
+# ╔═╡ 757e10e7-1cd2-476c-a189-923aad028ae9
+md"""
+## Classical MLP
+"""
+
+# ╔═╡ c1277d84-5430-4682-a751-b009f4df87d0
+begin
+	opt_nn = Flux.setup(Adam(η), NN)
+	losses_nn = []
 	
-	dT₁ = heating_df.T1 |> (y -> runmean(y, 21)) |> diff |> (y -> prepend!([0.0, ], y)) 
-	T1ₑₓₜᵣₑₘₑ = heating_df[:, :T1][dT₁ .== 0]
-	tₑₓₜᵣₑₘₑ = heating_df[:, :time][dT₁ .== 0]
-	rowsₑₓₜᵣₑₘₑ = heating_df[:, :Column1][dT₁ .== 0]
-	scatter!(p1, tₑₓₜᵣₑₘₑ, T1ₑₓₜᵣₑₘₑ, label="Minima/Maxima", mc=:red);
+	for i ∈ 1:epochs
+		local_loss = []
+		for (x, y) in loader
+			loss, grads = Flux.withgradient(NN) do m
+				ŷ = m(x)
+				Flux.mse(ŷ, y)
+			end
+			Flux.update!(opt_nn, NN, grads[1])
+			push!(local_loss, loss)
+		end
+		push!(losses_nn, Flux.mean(local_loss))
+	end
+end
 
-	d2T₁ = dT₁ |> (y -> runmean(y, 21)) |> diff |> (y -> prepend!([0.0, ], y)) 
-	T1ₜᵤᵣₙ  = heating_df[:, :T1][d2T₁ .== 0.0]
-	tₜᵤᵣₙ = heating_df[:, :time][d2T₁ .== 0.0]
-	rowsₜᵤᵣₙ = heating_df[:, :Column1][d2T₁ .== 0]
-	scatter!(p1, tₜᵤᵣₙ, T1ₜᵤᵣₙ, label="Turning points", mc=:yellow);
+# ╔═╡ 2824ad6b-b032-42c8-927c-ce6308c7d7bc
+Tpred_nn = [NN(x) for x in x_full_m] .|> first;
 
+# ╔═╡ 0f22424a-6147-4326-bed4-65061502d496
+plot(1:epochs, log10.(losses_nn), 
+	title="Loss",
+	label="MSE MLP",
+	xlabel="Epoch", 
+	ylabel="log₁₀ mse",)
+
+# ╔═╡ 35aed450-88a5-460a-92b0-39375a28a165
+plot(heating_df.global_duration, 
+	[heating_df.T1 Tpred_nn],
+	label=["Heizkurve" "Vorhersage MLP"],
+	xlabel="t /s", 
+	title="Vollständige Heizkurven",
+	ylabel="T /K",)
+
+# ╔═╡ 2d6f1e50-4bfa-47fa-8ae2-728506db9b19
+md"""
+Es zeigt sich, dass die Optimierung beginnt mit dem Steigerung der vorhergesagten Temperatur auf die mittlere Temperatur während der Messung. Danach wird die Temperatur für jden einzelnen Lauf optimiert.
+
+### Speichern des Modelles
+
+"""
+
+# ╔═╡ fdf54f26-8169-405e-a288-8247ed275c99
+begin
+	nn_state = Flux.state(NN);
+	jldsave("nn_model.jld2"; nn_state)
 end
 
 # ╔═╡ a372911c-2c18-495e-9098-4bc76a6700ed
 md"""
 
-## Compute PINN
-### Erstellen des physikalischen Loss, Modell: FOPDT
+## PINN - FOPDT
+### Fitten des FOPDT
 
-Der physikalische Loss-Termin wird mittels [FOPDT model](https://apmonitor.com/pdc/index.php/Main/FirstOrderOptimization) erstellt, um die Faktoren τ ,Κ, θ zu bestimmen. 
+Der physikalische Loss-Termin wird mittels [first order principle plud dead time (FOPDT)-Modell](https://apmonitor.com/pdc/index.php/Main/FirstOrderOptimization) erstellt, um die Faktoren τ ,Κ, θ zu bestimmen. 
 Da nur τ in die Abkühlung eingeht, wird der Term erst für die Abkühlung berechnet und dann, der Faktor τ in die Heizungsphase eingesetzt.
 
 Das ODE wird mit nlsove gelöst.
@@ -86,170 +237,117 @@ Eingesetzt werden die Messwerte den ersten, 75ten und 130ten Messpunkt.
 
 # ╔═╡ 9d9ef719-b19b-471e-b6ba-3bcf07fded6f
 function FOPDT_off(z)
-    τ = z[1]
+    τ = z[1];
 	
-    return [dT + celsius2kelvin(T) / τ for (dT, T) in zip([-0.2425,], [76.006,])]
+    return [dT + celsius2kelvin(T) / τ for (dT, T) in zip([-0.2425,], [76.006,])];
 end
 
 # ╔═╡ 2683688e-e96d-42b3-80cb-ae12ec4d767d
 begin
 	function FOPDT_on(z)
-	    τ = 1439.8
-		Κ, θ = z
+	    τ = 1439.8;
+		Κ, θ = z;
 		
-	    return [dT + (1 / τ) * (celsius2kelvin(T) + Κ * 100 *(θ -i)) for (dT, T, i) in zip(
+	    return [dT + (1 / τ) * (celsius2kelvin(T) + Κ * 1 *(θ -i)) for (dT, T, i) in zip(
 			[0.279, 0.3065],
 			[46.035,60.279], 
-			[75, 130])]
+			[75, 130])];
 	
 	end
 end
 
 # ╔═╡ d8e34379-6d4b-4149-a2f4-a4944a28f2c4
 begin
-	initial_x_off = [1439.8, ]
-	sol_off = nlsolve(FOPDT_off, initial_x_off, xtol=1e-7, ftol=1e-4)
+	initial_x_off = [1439.8, ];
+	sol_off = nlsolve(FOPDT_off, initial_x_off, xtol=1e-7, ftol=1e-6);
 	sol_off
 end
 
 # ╔═╡ bfb4ace1-1c7f-4305-b83a-f6c7a6feba3f
 begin
-	initial_x_on = [0.0097889, -666.1]
-	sol_on = nlsolve(FOPDT_on, initial_x_on, xtol=1e-4, ftol=1e-4)
+	initial_x_on = [0.0097889, -666.1];
+	sol_on = nlsolve(FOPDT_on, initial_x_on, xtol=1e-6, ftol=1e-6);
 	sol_on
 end
 
-# ╔═╡ b591c60e-f469-445b-9387-78add00b4755
+# ╔═╡ d4b240f7-cbf9-4fa2-9046-bf38661b1d9c
 md"""
-
-### Compute PINN
+### Erstellen des Beispieldatensatzes für die Physikalischen Lossfunktionen
 """
 
 # ╔═╡ 5e1c95cc-46e3-4161-aaa1-0232ee06b119
 begin
-	rowsₛₐₘₚₗₑ = vcat(rowsₑₓₜᵣₑₘₑ[1:10], rowsₜᵤᵣₙ[1:20]) |> sort |> unique
-	rowsₛₐₘₚₗₑ =rowsₛₐₘₚₗₑ[1+4:end-4]
-	
-	is_at_sample_time = heating_df.Column1 .∈ Ref(rowsₛₐₘₚₗₑ)
-	sample_df = heating_df[is_at_sample_time, :]
-	sample_df
-	samples = sample_df |> Matrix
+	is_at_sample_time = heating_df.Column1 .∈ Ref(rowsΔ);
+	sample_df = heating_df[is_at_sample_time, :];
+	samples = sample_df |> Matrix;
 end
 
 # ╔═╡ cc3cd8e5-5749-4165-b9ee-e3199a0151b3
 md"""
-Das physikalische Model wird mittels FOPDT ertellt. Die bereits ermittelten Faktoren Κ, τ, θ werden hier eingesetzt. Die linke Seite des ODE wird durch einen delta zum vorherigen Messpunkt bestimmt. Da beide Seiten des ODE gleich sein sollten, wird diese Bedingung zum Minimierung (als Loss-Term) genutzt. 
+### Erstellen des FOPDT-Losses
+Das physikalische Model wird mittels FOPDT ertellt. Die bereits ermittelten Faktoren Κ, τ, θ werden hier eingesetzt. 
+Die aktuelle Temperatur wurd aus dem neuronalen Netzwerk vorhergesagt. Daher wird die linke Seite des ODE durch das Delta der Vorhersagetemperatur um die Beispielsmesspunkte berechnet. Beide Seiten des ODE müssen gleich sein, daher wird diese Bedingung zum Minimierung (als Loss-Term, oder [Regularisierung](https://fluxml.ai/Flux.jl/stable/training/training/#Regularisation)) genutzt. 
 """
 
 # ╔═╡ 46ae8dc5-e139-4018-97ef-03581ccf6e26
 begin
-	NN_pinn = Chain(
-		Dense(2 => 16, relu),
-		Dense(16 => 1)
-	) |> f64
-	
-	function loss_physical(x)
 
-		Κ = 0.0097889
-		τ = 1439.8
-		θ = -661.1
+	function loss_fopdt(x)
 
-		# Q1 := index 4 in vector, T1prev := index 9
-		ŷ = [x[4], x[9]] |> NN_pinn |> first
-		prev_index = convert(Int, x[1]) - 1
-		xₚᵣₑᵥ = heating_curves[prev_index, :]
+		Κ = 0.9788818181818202;
+		τ = 1439.818556461867;
+		θ = -661.4415056140165;
 
-		ŷₚᵣₑᵥ = [xₚᵣₑᵥ[4], xₚᵣₑᵥ[9]] |> NN_pinn |> first
-		Δyₗ = ŷ - ŷₚᵣₑᵥ
-		U = x[4]
-		i₀ = x[8]  # duration
+		# t_global_duration := Spalte 9 im Datensatz
+		ŷₙₑₓₜ = [x[9] + 0.5] |> NN_fopdt |> first;
+		ŷₚᵣₑᵥ = [x[9] - 0.5] |> NN_fopdt |> first;
+		Δy_pred = ŷₙₑₓₜ - ŷₚᵣₑᵥ;
+
+		ŷ = [x[9]] |> NN_fopdt |> first;
+		U = x[4] /100;
+		i₀ = x[8];  # Zeit seit letzten Start der Heizung
 		
-		yᵣ = (.-ŷ .+ Κ .* U .*(i₀ .- θ)) ./ τ
+		yᵣ = (.-ŷ .+ Κ .* U .*(i₀ .- θ)) ./ τ;
 		
-		return sum((Δyₗ .- yᵣ) .^2)
+		return sum((Δy_pred .- yᵣ) .^2)
 	end
+	loss_fopdt() = eachrow(samples) .|> loss_fopdt |> sum |> (x)->(x*13_000)
+end
 
-	loss_physical() = eachrow(samples) .|> loss_physical |> sum
+# ╔═╡ 99671fef-cd7b-4a60-80f8-8c28ffa173f2
+md"""
+### Trainieren des FOPDT-Modells
+"""
 
-	# loss_ratio = 1 / size(sample_m)[1]
-	loss_ratio = 0.5 
+# ╔═╡ 96429da4-48a2-4b1d-97d1-7dd3ab6d361c
+begin
+	opt_fopdt = Flux.setup(Adam(η), NN_fopdt);
+	losses_fopdt_mse = [];
+	losses_fopdt_phy = [];
+
 	
-	loss_total(ŷ, y) = (1 - loss_ratio) * Flux.mae(ŷ, y)+ loss_ratio * loss_physical()
+	for i ∈ 1:epochs
+		local_loss_mse = []
+		local_loss_phy = []
+		for (x, y) in loader
+			grads = Flux.gradient(NN_fopdt) do m
+				ŷ = m(x);
+				(Flux.mse(ŷ, y) + loss_fopdt())/2
+			end
+			Flux.update!(opt_fopdt, NN_fopdt, grads[1]);
+			push!(local_loss_mse, Flux.mse(NN_fopdt(x), y));
+			push!(local_loss_phy, loss_fopdt());
+		end
+		push!(losses_fopdt_mse, Flux.mean(local_loss_mse));
+		push!(losses_fopdt_phy, Flux.mean(local_loss_phy));
+	end
 end
 
 # ╔═╡ f5c5badd-73a4-465d-90dd-a5caa28e8c92
 md"""
-Als Eingabe in das Netzwerk wird die aktuelle Q1 und die vorherige Temperatur gewählt.
-
-Wie bestimmt man nur aus t oder Q mit in einem PINN die Temperatur, die ja eine Aggregation ist? Mit RNN?
-
-Batchgröße ist 1 (keine Mini-Batches). (Bin froh, dass es lief.)
-
-Wenn man die grads aus Flux.withgradient nutzt, mann man dass denn im physikalischen Loss nutzen, wenn dieses für das aktuelle Batch berechnet, aber nicht für andere Punkte?
+Als Eingabe in das Netzwerk wird die Zeit seit Start der Messung gewählt.
+Batchgröße ist 64. Bei Minibatching musste der physikalische Lossterm skaliert werden.
 """
-
-# ╔═╡ 195daac5-daf3-4fc8-ad2b-b86453819429
-begin
-	train_mask = 1: Int.(length(heating_df.T1)//2)
-	
-	train_df = heating_df[train_mask, :]
-
-	x_train_df = train_df[:,[:Q1, :T1prev]]
-	x_train_m = x_train_df|> Matrix
-	x_train_m  =  [x for x in eachrow(x_train_m)]
-
-	y_train = train_df[:, :T1]
-
-	train_set = [(x, y) for (x, y) in zip(x_train_m, y_train)]
-	
-	η = 1e-5
-	opt_pinn = Flux.setup(Adam(η), NN_pinn)
-	epochs = 10
-
-	losses_pinn = []
-	
-	for i in 1:epochs
-		local_loss = []
-		for (x, y) in train_set
-			loss, grads = Flux.withgradient(NN_pinn) do m
-				ŷ = m(x)
-				loss_total(ŷ, y)
-			end
-			Flux.update!(opt_pinn, NN_pinn, grads[1])
-			push!(local_loss, loss)
-		end
-		push!(losses_pinn, Flux.mean(local_loss))
-	end
-end
-
-# ╔═╡ a7bbe7bc-e1ba-4419-9ac2-41e27a7a41d7
-md"""
-hier ein weiterer Lauf auf einem ähnlichen Netztwerk. Allerdings nur mit mae als Lossfunktion.
-"""
-
-# ╔═╡ c1277d84-5430-4682-a751-b009f4df87d0
-begin
-	NN_dense = Chain(
-		Dense(2 => 16, relu),
-		Dense(16 => 1)
-	) |> f64
-
-	opt_nn = Flux.setup(Adam(η), NN_dense)
-	losses_nn = []
-	
-	for i in 1:epochs
-		local_loss = []
-		for (x, y) in train_set
-			loss, grads = Flux.withgradient(NN_dense) do m
-				ŷ = m(x)
-				Flux.mae(ŷ, y)
-			end
-			Flux.update!(opt_nn, NN_dense, grads[1])
-			push!(local_loss, loss)
-		end
-		push!(losses_nn, Flux.mean(local_loss))
-	end
-end
 
 # ╔═╡ 539dc603-636c-49d9-a402-c2e731d9baee
 md"""
@@ -260,42 +358,181 @@ Oft PINN nicht besser als NN, daher mit Absicht Gewichtung 0.5.
 """
 
 # ╔═╡ 552252d9-afb3-407f-a168-d2e7ca62f679
-scatter([losses_pinn losses_nn], title = "Mean loss", lw = 4, 
-		xlabel = "Epoche", ylabel = "mₗₒₛₛ", label=["PINN" "NN"],)
-
-# ╔═╡ 73f00d67-63a6-4429-b613-dc3935861459
 begin
-	x_full_df = heating_df[:,[:Q1, :T1prev]]
-	x_full_m = x_full_df |> Matrix # |> eachrow
-	x_full_m  =  [x for x in eachrow(x_full_m)]
 	
-	heating_df.Tpred_nn = [NN_dense(x) for x in x_full_m] .|> first
-	heating_df.Tpred_pinn = [NN_pinn(x) for x in x_full_m] .|> first
+	plt1 = plot(1:epochs, 
+		[log10.(losses_nn) log10.(losses_fopdt_phy) log10.(losses_fopdt_mse)], 
+		title = "Loss", 
+		lw = [6 2 2], 
+		xlabel = "Epoch", 
+		ylabel = "Log₁₀ Loss", 
+		la=[0.5 1 1], 
+		lc=[:red :blue :aqua :cyan],
+		label=["NN" "PINN-FOPDT" "PINN-MSE"])
+	
+	losses_fopdt = convert(Any, (losses_fopdt_phy + losses_fopdt_mse)./2.0)
+	plot!(plt1, 1:epochs, log10.(losses_fopdt), lw=2, lc=:darkcyan,label="PINN total")
 end
 
-# ╔═╡ 840bf2b1-a37f-475d-88f0-5425de922c1e
-md"""
-Darstellung der Vorhersagen einmal des PINN undes einfachen Multilayerperzeptron.
-
-Ab und an (nicht immer), erscheint beim Umschalten zwischen Heizen und Kühlen (und vice versa) ein sehr hoher Offset.
-Ensteht das durch
-- die Q1 Eingabe
-- Fehler im phyikalischen Loss (Nein, dass Phenomen sieh man auch im MLP).
-- Lernrate
-- keine Batches
-- niedrige Anzahl von Trainings?
-"""
+# ╔═╡ 73f00d67-63a6-4429-b613-dc3935861459
+Tpred_fopdt = [NN_fopdt(x) for x in x_full_m] .|> first;
 
 # ╔═╡ 011a7d05-935c-4e1c-a200-391d4108c72a
 begin
-	first_run_df = heating_df[(heating_df.run .== 1)  , : ]
-	# first_run_df = first_run_df[300:310, :]
-	
-	@df first_run_df plot(:time, [:T1 :Tpred_nn :Tpred_pinn], colour = [:red :blue :green],
-	legend = :topright,
-			xlabel = "Time ∖s", ylabel = "T  ∖K",
-			title = "Comparision Full Heating Curves", lw = lw = [5 1 2])
+	plot(heating_df.global_duration, [heating_df.T1 Tpred_nn Tpred_fopdt], 
+		colour = [:red :blue :green],
+		legend = :topright,
+		xlabel = "Time ∖s", 
+		ylabel = "T  ∖K",
+		label = ["Heizkurve" "Vorhersage MLP" "Vorhersage PINN-FOPDT"],
+		title = "Heizkruven", 
+		lw = [5 2 2])
 end
+
+# ╔═╡ ff6a3eb0-ced6-4901-ab72-5e6a95667e5d
+md"""
+### Speichern des FOPDT-Modells
+"""
+
+# ╔═╡ 2bd87b9f-46dc-492f-9074-a6fd11956270
+begin
+	pinn_fopdt_state = Flux.state(NN_fopdt);
+	jldsave("pinn_fopdt_model.jld2"; pinn_fopdt_state)
+end
+
+# ╔═╡ 31918ef3-73f2-4f69-9c71-639ba0ecc191
+md"""
+## PINN - Wärmefluss
+
+Anstelle des angefittenten FOPDT Models wird hier ein mechanistisches Model für das ODE verwendet. Das Model beschreibt das ODE aus dem [Wärmefluss](https://apmonitor.com/pdc/index.php/Main/ArduinoModeling) (heat transfer).
+
+Die notwendigen physikalischen Parameter sind dem obigen Quelle entnommen.
+
+### Erstellen des physikalischen Loss-Terms
+"""
+
+# ╔═╡ 9875d167-60c7-4899-a823-41439ffd4fd1
+begin
+	function loss_transfer(x)
+	
+		m = 0.004  # kg
+		cₚ = 500  # J/(kg K)
+		U = 10  # W / (m² K)
+		A = 1.2*1e-3  # m2
+		T∞ = 294.6 # 296.16 K on the website, taken the starting temperature instead
+		ϵ = 0.9
+		σ = 5.67*1e-8 # W/(m² K⁴)
+		α = 0.01 * x[4]
+		T = x[2]
+		Q = 1  # W
+		
+		dTdt = (U * A * (T∞ - T) + ϵ * σ * (T∞^4 - T^4) + α * Q) / (m * cₚ)
+	
+		t = x[9]  #  time since start
+		dTdt_pred =  NN_transfer([t + 0.5]) .- NN_transfer([t - 0.5])
+		
+		return sum((dTdt_pred .- dTdt) .^2)
+	end
+	
+	loss_transfer() = eachrow(samples) .|> loss_transfer |> sum |> (x) -> (x/10)
+end
+
+# ╔═╡ 7563d048-147a-4fbb-8db2-cfee296a31d3
+md"""
+### Trainieren des Modells
+"""
+
+# ╔═╡ 351b6a22-8411-4126-9057-2784c87e3d4f
+begin
+	opt_transfer = Flux.setup(Adam(η), NN_transfer);
+	losses_transfer_mse = [];
+	losses_transfer_phy = [];
+
+	
+	for i ∈ 1:epochs
+		local_loss_mse = []
+		local_loss_phy = []
+		for (x, y) in loader
+			grads = Flux.gradient(NN_transfer) do m
+				ŷ = m(x);
+				(Flux.mse(ŷ, y) + loss_transfer())/2
+			end
+			Flux.update!(opt_transfer, NN_transfer, grads[1]);
+			push!(local_loss_mse, Flux.mse(NN_transfer(x), y));
+			push!(local_loss_phy, loss_transfer());
+		end
+		push!(losses_transfer_mse, Flux.mean(local_loss_mse));
+		push!(losses_transfer_phy, Flux.mean(local_loss_phy));
+	end
+end
+
+# ╔═╡ 9f52a9c0-6fd4-4d05-97fd-dc80468c7e4f
+losses_transfer = (losses_transfer_mse .+ losses_transfer_phy) ./ 2
+
+# ╔═╡ 27e6c2de-a08e-4d24-a8b2-62a9c5c4324b
+plot(1:epochs, 
+	[log10.(losses_transfer_mse) log10.(losses_transfer_phy) log10.(losses_transfer)], 
+	title = "Loss PINN - heat transfer model", 
+	lw = [6 2 2], 
+	xlabel = "Epoch", 
+	ylabel = "Log₁₀ Loss", 
+	la=[0.5 1 1], 
+	lc=[:red :blue :aqua :cyan],
+	label=["MSE" "Physical" "Total"])
+
+
+# ╔═╡ 015c0f04-85fb-4c2a-82ce-db0ddc848f17
+Tpred_transfer = [NN_transfer(x) for x in x_full_m] .|> first;
+
+# ╔═╡ 4d7ac675-5bad-464b-affa-b3096e8342d8
+begin
+	plot(heating_df.global_duration, [heating_df.T1 Tpred_nn Tpred_fopdt Tpred_transfer], 
+		colour = [:red :blue :green :orange],
+		legend = :topright,
+		xlabel = "Time ∖s", 
+		ylabel = "T  ∖K",
+		label = ["Heizkurve" "Vorhersage MLP" "Vorhersage PINN-FOPDT" "Vorhersage PINN-Wärmefluss"],
+		title = "Vollständige Heizkurven", 
+		lw = [5 2 2 4])
+end
+
+# ╔═╡ 1db1f070-fb98-4bb6-ab39-4e9e8e1a86cb
+md"""
+### Speichern des PINN mit meachnistischen Modell
+"""
+
+# ╔═╡ ba050844-0b6c-4fc5-b3c3-89548127679a
+begin
+	pinn_transfer_state = Flux.state( NN_transfer);
+	jldsave("pinn_transfer_model.jld2"; pinn_transfer_state)
+end
+
+# ╔═╡ 70b759dc-b50a-41e9-a596-c71460781b6e
+md"""
+
+## Änderungen und Fazit
+
+Folgende Anpassungen sind seit der dritten Forlesung erfolgt:
+
+- Anpassung der Eingabe Matrix
+- Anpassung des FOPDT-Models
+- Einführung des Models mit Wärmefluss
+- Einbau von Mini-Batches
+- Anpassungen der Beispieldatensatzes für den physikalischen Loss
+
+Bisher wurden als EingabeMatrix eine der Vorherige Temperaturwert und der aktuelle Prozentwert der Heizung eingeben. Dies wurde ersetzt durch die Zeit seit dem Start der Messung. Dies erschwerte die Anpassung, dieses ist allerdings noch möglich.
+
+Die Berechnung des Loss beim FOPDT-Modell wurde so angepasst, dass kein Lookup mehr notwenig ist, um die Rechenzeit zu kürzen.
+
+Da das bisherige Ergebnis nicht zufriedenstellend war, wurde neben dem FOPDT-Modell noch das Wärmefluss-Modell hinzugefügt ohne wesentliche/ deutliche Verbesserungen, gegenüber den klassischen MLP-Modells. Erst der Wechsel auf Minibatches führte zur erfolgreicher Optimierung mit der neuen Eingabematrix. Der aufgezeichnete Loss wird glatter, die Berechnung wird beschleunigt.
+
+Beides rührt daher, das nur noch eine Backpropagation pro Batch statt eine Backpropagation pro Messpunkt durchgeführt wird. Damit sinkt der zeitliche Rechenbedarf für die Backpropagation und gleichzeitig, wird die Backpropagation gemittelt über alle Messpunkte des Batches. Die Richtungen der Optimierungsschritte Streuen weniger. Je nach Implentierung können auch beim Minibatching weitere Rechenkerne im Feedforward eingesetzt werden, da diese Schritte innerhalb eines Batches unabhängig von einander sind.
+
+Obwohl aller Optimimerungen kann eine Verbessungerung des Lernens durch die Verwendung des PINNS nicht immer garantiert werden. Es zeigt sich für die verwendete Methodik, das der physikaische Loss bei FODPT viel starrer während der fortschreiteten Epochen bleibt. zwar bleibt der pyhsikalische Loss beim Wärmeflussmodell kaum verändert, lernt das Model geringfügig besser als das reine MLP.
+
+
+Der physikalische Loss wurde erst an Punkten bestimmt, wo die erste, zweite und dritte Ableitung im rollenden Mittel null wurde. Nach der Vorlesung wurden insbesondere Punkte zufällig aber Proportional zum Absolutwert des rollenden Mittelwert der ersten Ableitung der Temperatur bestimmt, da die erste Ableitung die Sensitivtät des Signals vom Eingang beschreibt. Eine direkte Verbessung konnte nicht bestimmt werden. Der physikalische Loss wurde allerding nur für den ersten und fünften Lauf bestimmt. Danach wurde der Loss für den ersten bis einschließlich den fünften Lauf bestimmt. Der die erste Optimierung des Netzes, die Findung der Mittelwert der Temperatur ist, wäre es ratsam als zweites Kritterium die Abweichung von dieser Temperatur zu wählen, um so dass Modell zu unterstützen von der Mittelwerttemperatur abzuweichen.
+"""
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -303,16 +540,23 @@ PLUTO_PROJECT_TOML_CONTENTS = """
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 RollingFunctions = "b0e4dd01-7b14-53d8-9b45-175a3e362653"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 StatsPlots = "f3b207a7-027a-5e70-b257-86293d7955fd"
 
 [compat]
 CSV = "~0.10.11"
 DataFrames = "~1.5.0"
 Flux = "~0.13.16"
+JLD2 = "~0.4.31"
 NLsolve = "~4.5.1"
+PlutoUI = "~0.7.51"
 RollingFunctions = "~0.7.0"
+StatsBase = "~0.34.0"
 StatsPlots = "~0.15.5"
 """
 
@@ -320,9 +564,9 @@ StatsPlots = "~0.15.5"
 PLUTO_MANIFEST_TOML_CONTENTS = """
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.9.0"
+julia_version = "1.9.1"
 manifest_format = "2.0"
-project_hash = "3455ad4fbe713e638a19a3edff28ae92dd01306e"
+project_hash = "e5683b39ba467ddd81f0dd5f48cbdd409056e2b0"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -333,6 +577,12 @@ weakdeps = ["ChainRulesCore"]
 
     [deps.AbstractFFTs.extensions]
     AbstractFFTsChainRulesCoreExt = "ChainRulesCore"
+
+[[deps.AbstractPlutoDingetjes]]
+deps = ["Pkg"]
+git-tree-sha1 = "8eaf9f1b4921132a4cff3f36a1d9ba923b14a481"
+uuid = "6e696c72-6542-2067-7265-42206c756150"
+version = "1.1.4"
 
 [[deps.Accessors]]
 deps = ["CompositionsBase", "ConstructionBase", "Dates", "InverseFunctions", "LinearAlgebra", "MacroTools", "Requires", "Test"]
@@ -805,6 +1055,12 @@ git-tree-sha1 = "656f7a6859be8673bf1f35da5670246b923964f7"
 uuid = "b9860ae5-e623-471e-878b-f6a53c775ea6"
 version = "0.1.1"
 
+[[deps.FileIO]]
+deps = ["Pkg", "Requires", "UUIDs"]
+git-tree-sha1 = "299dc33549f68299137e51e6d49a13b5b1da9673"
+uuid = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+version = "1.16.1"
+
 [[deps.FilePathsBase]]
 deps = ["Compat", "Dates", "Mmap", "Printf", "Test", "UUIDs"]
 git-tree-sha1 = "e27c4ebe80e8699540f2d6c805cc12203b614f12"
@@ -992,6 +1248,24 @@ git-tree-sha1 = "0ec02c648befc2f94156eaef13b0f38106212f3f"
 uuid = "34004b35-14d8-5ef3-9330-4cdb6864b03a"
 version = "0.3.17"
 
+[[deps.Hyperscript]]
+deps = ["Test"]
+git-tree-sha1 = "8d511d5b81240fc8e6802386302675bdf47737b9"
+uuid = "47d2ed2b-36de-50cf-bf87-49c2cf4b8b91"
+version = "0.0.4"
+
+[[deps.HypertextLiteral]]
+deps = ["Tricks"]
+git-tree-sha1 = "c47c5fa4c5308f27ccaac35504858d8914e102f9"
+uuid = "ac1192a8-f4b3-4bfe-ba22-af5b92cd3ab2"
+version = "0.9.4"
+
+[[deps.IOCapture]]
+deps = ["Logging", "Random"]
+git-tree-sha1 = "d75853a0bdbfb1ac815478bacd89cd27b550ace6"
+uuid = "b5f81e59-6552-4d32-b1f0-c071b021bf89"
+version = "0.2.3"
+
 [[deps.IRTools]]
 deps = ["InteractiveUtils", "MacroTools", "Test"]
 git-tree-sha1 = "eac00994ce3229a464c2847e956d77a2c64ad3a5"
@@ -1050,6 +1324,12 @@ version = "0.2.2"
 git-tree-sha1 = "a3f24677c21f5bbe9d2a714f95dcd58337fb2856"
 uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
+
+[[deps.JLD2]]
+deps = ["FileIO", "MacroTools", "Mmap", "OrderedCollections", "Pkg", "Printf", "Reexport", "Requires", "TranscodingStreams", "UUIDs"]
+git-tree-sha1 = "42c17b18ced77ff0be65957a591d34f4ed57c631"
+uuid = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+version = "0.4.31"
 
 [[deps.JLFzf]]
 deps = ["Pipe", "REPL", "Random", "fzf_jll"]
@@ -1278,6 +1558,11 @@ weakdeps = ["ChainRulesCore", "ForwardDiff", "SpecialFunctions"]
     [deps.LoopVectorization.extensions]
     ForwardDiffExt = ["ChainRulesCore", "ForwardDiff"]
     SpecialFunctionsExt = "SpecialFunctions"
+
+[[deps.MIMEs]]
+git-tree-sha1 = "65f28ad4b594aebe22157d6fac869786a255b7eb"
+uuid = "6c6e2e6c-3030-632d-7369-2d6c69616d65"
+version = "0.1.4"
 
 [[deps.MKL_jll]]
 deps = ["Artifacts", "IntelOpenMP_jll", "JLLWrappers", "LazyArtifacts", "Libdl", "Pkg"]
@@ -1542,6 +1827,12 @@ version = "1.38.16"
     IJulia = "7073ff75-c697-5162-941a-fcdaad2a7d2a"
     ImageInTerminal = "d8c32880-2388-543b-8c61-d9f865259254"
     Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[[deps.PlutoUI]]
+deps = ["AbstractPlutoDingetjes", "Base64", "ColorTypes", "Dates", "FixedPointNumbers", "Hyperscript", "HypertextLiteral", "IOCapture", "InteractiveUtils", "JSON", "Logging", "MIMEs", "Markdown", "Random", "Reexport", "URIs", "UUIDs"]
+git-tree-sha1 = "b478a748be27bd2f2c73a7690da219d0844db305"
+uuid = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+version = "0.7.51"
 
 [[deps.PolyesterWeave]]
 deps = ["BitTwiddlingConvenienceFunctions", "CPUSummary", "IfElse", "Static", "ThreadingUtilities"]
@@ -1924,6 +2215,11 @@ git-tree-sha1 = "25358a5f2384c490e98abd565ed321ffae2cbb37"
 uuid = "28d57a85-8fef-5791-bfe6-a80928e7c999"
 version = "0.4.76"
 
+[[deps.Tricks]]
+git-tree-sha1 = "aadb748be58b492045b4f56166b5188aa63ce549"
+uuid = "410a4b4d-49e4-4fbc-ab6d-cb71b17b3775"
+version = "0.1.7"
+
 [[deps.URIs]]
 git-tree-sha1 = "074f993b0ca030848b897beff716d93aca60f06a"
 uuid = "5c2747f8-b7ea-4ff2-ba2e-563bfd36b1d4"
@@ -2218,7 +2514,7 @@ version = "0.15.1+0"
 [[deps.libblastrampoline_jll]]
 deps = ["Artifacts", "Libdl"]
 uuid = "8e850b90-86db-534c-a0d3-1478176c7d93"
-version = "5.7.0+0"
+version = "5.8.0+0"
 
 [[deps.libfdk_aac_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -2268,29 +2564,57 @@ version = "1.4.1+0"
 """
 
 # ╔═╡ Cell order:
+# ╟─d8760ed7-947f-4a3c-be31-08f67020e769
 # ╠═32ac2420-0ad8-11ee-2d6f-2d8c15a32168
+# ╟─993eda49-5f21-4368-94a6-4801f949a97b
+# ╠═8733e584-78c6-41c4-9f30-e86ada17fe8f
+# ╠═5072d3c3-1963-4d3e-8b04-ec848d005996
 # ╠═ed1920f6-e175-4032-9f8b-eb26a49ea193
 # ╠═bf2bea30-98a5-47f4-aa2b-108e88eac174
 # ╠═12487f1f-4209-443f-945a-8c85a0191aac
-# ╠═0dd3c3d4-3758-4430-a403-96b49a42d44c
+# ╠═95e49920-3c3b-4467-914a-9a93714cc9de
+# ╟─0dd3c3d4-3758-4430-a403-96b49a42d44c
 # ╠═6a9e72c0-60de-44b4-ab2a-dcf4c6bd2138
-# ╠═a372911c-2c18-495e-9098-4bc76a6700ed
+# ╟─1a2337f0-bede-4d7d-8fdb-125406dbb703
+# ╠═90fa8c5e-e048-4133-b8d3-89116bab7ae4
+# ╠═cf7f7ede-39d8-4ab3-b604-6b076e14c978
+# ╟─9d979f43-e5bb-47c9-90d2-e6194483e8f3
+# ╠═c4d1c1d8-8fa8-441c-9713-9560c12ad2e9
+# ╟─757e10e7-1cd2-476c-a189-923aad028ae9
+# ╠═c1277d84-5430-4682-a751-b009f4df87d0
+# ╠═2824ad6b-b032-42c8-927c-ce6308c7d7bc
+# ╟─0f22424a-6147-4326-bed4-65061502d496
+# ╠═35aed450-88a5-460a-92b0-39375a28a165
+# ╟─2d6f1e50-4bfa-47fa-8ae2-728506db9b19
+# ╠═fdf54f26-8169-405e-a288-8247ed275c99
+# ╟─a372911c-2c18-495e-9098-4bc76a6700ed
 # ╠═9d9ef719-b19b-471e-b6ba-3bcf07fded6f
 # ╠═2683688e-e96d-42b3-80cb-ae12ec4d767d
 # ╠═d8e34379-6d4b-4149-a2f4-a4944a28f2c4
 # ╠═bfb4ace1-1c7f-4305-b83a-f6c7a6feba3f
-# ╠═b591c60e-f469-445b-9387-78add00b4755
+# ╟─d4b240f7-cbf9-4fa2-9046-bf38661b1d9c
 # ╠═5e1c95cc-46e3-4161-aaa1-0232ee06b119
-# ╠═cc3cd8e5-5749-4165-b9ee-e3199a0151b3
+# ╟─cc3cd8e5-5749-4165-b9ee-e3199a0151b3
 # ╠═46ae8dc5-e139-4018-97ef-03581ccf6e26
-# ╠═f5c5badd-73a4-465d-90dd-a5caa28e8c92
-# ╠═195daac5-daf3-4fc8-ad2b-b86453819429
-# ╠═a7bbe7bc-e1ba-4419-9ac2-41e27a7a41d7
-# ╠═c1277d84-5430-4682-a751-b009f4df87d0
-# ╠═539dc603-636c-49d9-a402-c2e731d9baee
+# ╟─99671fef-cd7b-4a60-80f8-8c28ffa173f2
+# ╠═96429da4-48a2-4b1d-97d1-7dd3ab6d361c
+# ╟─f5c5badd-73a4-465d-90dd-a5caa28e8c92
+# ╟─539dc603-636c-49d9-a402-c2e731d9baee
 # ╠═552252d9-afb3-407f-a168-d2e7ca62f679
 # ╠═73f00d67-63a6-4429-b613-dc3935861459
-# ╠═840bf2b1-a37f-475d-88f0-5425de922c1e
 # ╠═011a7d05-935c-4e1c-a200-391d4108c72a
+# ╟─ff6a3eb0-ced6-4901-ab72-5e6a95667e5d
+# ╠═2bd87b9f-46dc-492f-9074-a6fd11956270
+# ╟─31918ef3-73f2-4f69-9c71-639ba0ecc191
+# ╠═9875d167-60c7-4899-a823-41439ffd4fd1
+# ╟─7563d048-147a-4fbb-8db2-cfee296a31d3
+# ╠═351b6a22-8411-4126-9057-2784c87e3d4f
+# ╠═9f52a9c0-6fd4-4d05-97fd-dc80468c7e4f
+# ╠═27e6c2de-a08e-4d24-a8b2-62a9c5c4324b
+# ╠═015c0f04-85fb-4c2a-82ce-db0ddc848f17
+# ╠═4d7ac675-5bad-464b-affa-b3096e8342d8
+# ╟─1db1f070-fb98-4bb6-ab39-4e9e8e1a86cb
+# ╠═ba050844-0b6c-4fc5-b3c3-89548127679a
+# ╟─70b759dc-b50a-41e9-a596-c71460781b6e
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
