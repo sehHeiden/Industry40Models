@@ -16,6 +16,7 @@ begin
 	using Plots
 	using PlutoUI
 	using BenchmarkTools
+	using JLD2
 end
 
 # ╔═╡ 535fd607-443c-487d-90b5-e187812ba6ce
@@ -28,8 +29,8 @@ Startwerte kann so der tatsächliche Graph abgebildert werden.
 Anstelle eines Solvers, wo einzelne Parameter des ODE angepasst werden, soll ein neurales Netzwerk trainiert werden, dass die ODE abbildet.
 
 Training eines NN (Dense).
- 1) 2->16, Aktivierungsfunktion tanh,
- 2) 16->2, Aktivierungsfunktion linear.
+ 1) 2->32, Aktivierungsfunktion tanh,
+ 2) 32->2, Aktivierungsfunktion linear.
 
 Eingabe in das Training: Zeitpunkte zu denen Gemessene Punkte mit trainierten verglichen werden sollen.
 
@@ -82,7 +83,7 @@ begin
 	
 	end_point = 3600;
 	tspan = (0.0, end_point);
-	tsteps = range(tspan[1], tspan[2], length=120);
+	tsteps = range(tspan[1], tspan[2], length=80);
 	
 	# seconds since start
 	t = heating_df[1:end_point, :time] .- heating_df.start_time[1];
@@ -106,10 +107,10 @@ end
 begin
 	# durch Interpolation langsam im Training
 	dudt = Flux.Chain(# x -> u_t.(x),  # wie Verallgemeinderung auf andere u_t
-	                  Flux.Dense(2=>64, tanh),
-	                  Flux.Dense(64=>2)) |> f64
+	                  Flux.Dense(2=>32, tanh),
+	                  Flux.Dense(32=>2)) |> f64
 	
-	n_ode = NeuralODE(dudt, tspan, DP5(), saveat=tsteps, reltol=1e-7, abstol=1e-9)
+	n_ode = NeuralODE(dudt, tspan, Tsit5(), saveat=tsteps, reltol=1e-3, abstol=1e-5)
 	
 	y_predict_before = n_ode(T0)
 	ps = Flux.params(n_ode.p)
@@ -127,39 +128,109 @@ end
 begin
 	
 	η = 1e-4
-	opt_n_ode = ADAM(η)
-	epoches = 10_000
+	opt_n_ode = ADAM(η, (0.9, 0.8))
 
 	loss_vector = Vector{Float64}()
 	callback() = push!(loss_vector, loss_n_ode())
+
+	epochs1 = 500
+	data1 = Iterators.repeated((), epochs1)
+
+	epochs2 = 4_500
+	data2 = Iterators.repeated((), epochs2)
+
+	epochs3 = 45_000
+	data3 = Iterators.repeated((), epochs3)
+
+	epochs = epochs1 + epochs2 + epochs3
 	
-	data = Iterators.repeated((), epoches)
-	
-	Flux.train!(loss_n_ode, ps, data, opt_n_ode, cb=callback)
+	Flux.train!(loss_n_ode, ps, data1, opt_n_ode, cb=callback)
+	opt_n_ode.eta = 5e-5
+	Flux.train!(loss_n_ode, ps, data2, opt_n_ode, cb=callback)
+	opt_n_ode.eta = 1e-5
+	Flux.train!(loss_n_ode, ps, data3, opt_n_ode, cb=callback)
 end
 
 # ╔═╡ aa673a75-4992-4fb6-8125-bb92c92a2469
-plot(1:epoches .|> log10, loss_vector .|> log10, label="mse log-log", title="Loss", xlabel = "Log(Epoche)", ylabel = "Loss log(mse)",)
+plot(1:epochs, loss_vector .|> log10, 
+	label="nODE", title="Loss", 
+	xlabel = "Epochen", ylabel = "Loss log(mse)",)
 
 # ╔═╡ b6487906-4e75-4a47-89fa-47455fa01d98
 begin
 	y_predict_after = n_ode(T0)
 	
 	# plot result	
-	p_node = plot(tsteps, ode_data[1], label="T1 °C", lc=:red, xlabel = "Epoche", ylabel = "Loss (mse)",)
+	p_node = plot(tsteps, ode_data[1], label="T1 °C", lc=:red, xlabel = "T /s", ylabel = raw"T /K",  title="Heizkurven")
 	plot!(p_node, tsteps, ode_data[2], label="T2 °C", lc=:green)
 	scatter!(p_node, tsteps, y_predict_after[1, :], label="predicted T1 °C", mc=:red)
 	scatter!(p_node, tsteps, y_predict_after[2, :], label="predicted T2 °C", mc=:green)
 end
 
+# ╔═╡ 3695e008-b153-4eb3-b5c8-c109dec54c0f
+md"""
+### Saving the Model
+"""
+
+# ╔═╡ c55f7162-a11e-4df0-beac-cf7f21d88a2d
+begin
+	model_state = Flux.state(n_ode);
+	jldsave("nODE_model.jld2"; n_ode)
+end
+
 # ╔═╡ d1874dc6-a3f8-47fc-98a6-e43848101c21
 md"""
-Beim Training mit zwei Temperaturkurven ist der Verlauf des Losses glatter als, wenn nur ein Sensor angelernt wird.
-Der Loss nimmt bis zu 1000 Zyklen ab und stackniert hiernach.
+## Änderungen und Fazit
+
+Der Loss nimmt bis zu 1000 Zyklen ab und stagniert hiernach.
 
 Die Oszilation der Temperaturen beim Heizen und Abkühlen konnte nicht nachgebildet werden.
 
-Die Der Prozentsatz der Intensität der Heizung wird, testweise mit Interpolation als erste Layer hinzugefügt.  Hierfür wurde eine ConstantInterpolation gewählt, da diese leicht schneller ist, als die Linear und bei den Wertebereich [0, 100] geringere Fehler machen sollte.
+Der Prozentsatz der Intensität der Heizung wird, testweise mit Interpolation als erste Layer hinzugefügt.  Hierfür wurde eine ConstantInterpolation gewählt, da diese leicht schneller ist, als die Linear und bei den Wertebereich [0, 100] geringere Fehler machen sollte.
+
+
+### Verwendung von zwei Temperaturen
+
+Beim Training mit zwei Temperaturkurven ist der Verlauf des Losses glatter, als wenn nur ein Sensor angelernt wird.
+
+
+### Tolleranz vs Rechenzeit
+
+Es wurden drei Parametersätze für die Auflösung des ODE getestet.
+
+| reltol | abstol| Rechenzeit pro Epoche \s|
+| ------ | ----- | ----------------------- |
+| 1e-3   | 1e-5  | 1.94 |
+| 1e-5   | 1e-7  | 2.83 |
+| 1e-7   | 1e-9  | 7.92 |
+
+Der Verlauf Prognose ist zwischen den Parametersätzen nicht wirklich unterschiedlich. Zusätzlich wurde eine Lauf mit einer relativen Toleranz von 1e-2 durchgeführt, hier hatte das System den Anschein, als ob zu schwingen beginnen würde. Allerdings kann es sich hier um ein Artefakt der hohen erlaubten Toleranz handeln, zusätlich war der aufgezeichnete Loss sehr verrauscht, eine Optimierung gelang hier nicht. Der Test mit der Toleranz von 1e-3 ein Optimum zu finden, wo das Rauschen verringt und dennoch  Schwingung erhalten bleibt war nicht erfolgreich.
+Der Unterschied in den reichenzeit sind bei hoher und Mittlerer Toleranz nicht wesentlich im Vergleich zur niedrigen Toleranz erst hier werden anscheinend wesentlich mehr Zwischenschritte für die Berechnung benötigt. Die Rechenzeit bezoglich auf zwei Layer mit 32 versteckten Knoten mit einem AMD Ryzen 5800X bei 120 Messpunkten. Aktuell wird zur Beschleunigung mit 80 Punkten gerechnet.
+
+### Optimierer
+
+ Tsit5 gegen DP5 getauscht. Der Verlauf Prognose ist zwischen den beiden Optimierern  nicht wesentlich unterschiedlich. Tsit5 war aber bei reltol=1e-3 , abstol=1e-5 mit einer Rechenzeit von 2.5 s pro Epoche langsamer. 
+
+### Anzahl der Punkte
+
+Die Anzahl festgelegten Zwischenschritte (tsave) wurde erhöht, damit mehr Trainingsbeispiele des Ausgabevektor des Netzes mit (interpolierten) Messwerten verglichen werden können, um so die Anzahl der Beispiele zu erhöhen. Die Anzahl wurde erst verdoppelt und dann verdreifacht. Dies führe jedoch nicht zu besseren Optimierungen. Daher wurde die Anzahl wieder auf Aktuell 80 Punkte reduziert.
+
+### Anzahl der Heizzyklen
+
+Desweiteren wurde getestet, ob mehr Heizzyklen als Beispiel in das Training überführt werden können. Dies führte zu keiner verbessung der Optimierung.
+
+### Optimierung des Aufgezeichneten Loss
+
+Die Funktion aufgezeichnete Loss war zum Teil sehr rauch. Es wurde vermutet, dieses dies insbesondere, dass weitere lernen verhindert. Deswegen unterschiedliche Schritte mit unterschiedlichen Lernraten getestet. Niedrige Lernraten führten zwar zur klatteren Kurven, aber nicht zur besseren Optimierungen. 
+
+### Variation der Hiddenlayer und Anzahl der Knoten
+
+Es wurde regelmäßig die Anzahl Layer von zwei bis zu fünf getestet. Gleichzeigig wurde die Anzahl der Knoten von 16, 32, 64 geprüft. Beide Veränderungen führen zu kleiner wesentlichen Verbessung im Loss. Das Modell fängt nicht an zu schwingen.
+
+
+### Erhöhung der Anzahl der Epochen
+
+Durch all die Optimierungen der Rechenzeit und der Reduzierung des Rauschens im Loss gelang, dass bei der Erhöhung der Anzahl der Epochen ein geringer Fortschritt beim Lernen möglich wurde. Nun gelingt es durch die Erhöhung der Epochen von 1_000 auf 20_000 für die erste Heizphase eine Abweichung von der Mitteltemperatur zu erreichen.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -171,6 +242,7 @@ DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 DataInterpolations = "82cc6244-b520-54b8-b5a6-8a565e85f1d0"
 DiffEqFlux = "aae7a2af-3d4f-5e19-a356-7da93b79d9d0"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
@@ -182,6 +254,7 @@ DataFrames = "~1.5.0"
 DataInterpolations = "~4.0.1"
 DiffEqFlux = "~2.0.0"
 Flux = "~0.13.16"
+JLD2 = "~0.4.31"
 OrdinaryDiffEq = "~6.53.1"
 Plots = "~1.38.16"
 PlutoUI = "~0.7.51"
@@ -193,7 +266,7 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.9.1"
 manifest_format = "2.0"
-project_hash = "6bb2998c511b596d949c9714967bf404f92887f8"
+project_hash = "6c3cbccc888a95fbab86cfb82db2ed88436e35a0"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "dcfdf328328f2645531c4ddebf841228aef74130"
@@ -816,6 +889,12 @@ git-tree-sha1 = "c1293a93193f0ae94be7cf338d33e162c39d8788"
 uuid = "29a986be-02c6-4525-aec4-84b980013641"
 version = "1.2.9"
 
+[[deps.FileIO]]
+deps = ["Pkg", "Requires", "UUIDs"]
+git-tree-sha1 = "299dc33549f68299137e51e6d49a13b5b1da9673"
+uuid = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+version = "1.16.1"
+
 [[deps.FilePathsBase]]
 deps = ["Compat", "Dates", "Mmap", "Printf", "Test", "UUIDs"]
 git-tree-sha1 = "e27c4ebe80e8699540f2d6c805cc12203b614f12"
@@ -1090,6 +1169,12 @@ version = "0.2.2"
 git-tree-sha1 = "a3f24677c21f5bbe9d2a714f95dcd58337fb2856"
 uuid = "82899510-4779-5014-852e-03e436cf321d"
 version = "1.0.0"
+
+[[deps.JLD2]]
+deps = ["FileIO", "MacroTools", "Mmap", "OrderedCollections", "Pkg", "Printf", "Reexport", "Requires", "TranscodingStreams", "UUIDs"]
+git-tree-sha1 = "42c17b18ced77ff0be65957a591d34f4ed57c631"
+uuid = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+version = "0.4.31"
 
 [[deps.JLFzf]]
 deps = ["Pipe", "REPL", "Random", "fzf_jll"]
@@ -2546,6 +2631,8 @@ version = "1.4.1+0"
 # ╠═8dafeaef-cacf-4076-b7dc-3b96c8544ec2
 # ╠═aa673a75-4992-4fb6-8125-bb92c92a2469
 # ╠═b6487906-4e75-4a47-89fa-47455fa01d98
+# ╟─3695e008-b153-4eb3-b5c8-c109dec54c0f
+# ╠═c55f7162-a11e-4df0-beac-cf7f21d88a2d
 # ╟─d1874dc6-a3f8-47fc-98a6-e43848101c21
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
