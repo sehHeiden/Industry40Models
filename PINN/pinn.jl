@@ -31,12 +31,6 @@ md"""
 ##  Laden und Aufbereitung der Messdaten.
 """
 
-# ╔═╡ 5072d3c3-1963-4d3e-8b04-ec848d005996
-begin
-	rng = Random.default_rng()
-	Random.seed!(1234)
-end
-
 # ╔═╡ ed1920f6-e175-4032-9f8b-eb26a49ea193
 celsius2kelvin(c) = c + 273.15
 
@@ -82,19 +76,12 @@ heating_df
 
 # ╔═╡ 0dd3c3d4-3758-4430-a403-96b49a42d44c
 md"""
-Anzeige des Verlaufes der Heizkurven.
+Unten wird der vollständige Verlauf der Heizkurven dargestellt. In der Darstellung sind die Testpunkte für den physikalischen Loss enthalten.
 
-Die Messpunkte werden wurden alle 1.1 s bis 1.3 s genommen (Dauer des Messens, Ablagen +  1 s). Zeitpunkte sind als Timestamps abgespeichert, die Temperatur wird gemessen in °C und Kelvin umgewandelt.
-
-Der Temperatursensor hat einen typischen Messfehler von 1 K und einen maximalen Fehler von 3 K.
-Der höchste gemessene Temperaturanstieg war 1.6 Kelvin pro Sekunde, der höchste Abfall - 2.5 Kelvin pro Sekunde.
-Aktuell wird eine Batchgröße von 64 gewählt.
-
-Für den physikalischen Loss werden max(30, Batchgröße) Messpunkte aus dem ersten bis fünften Lauf zufällig ausgewählt. Die Wahrscheinlichkeit der Auswahl ist proprotional dem quadrat desDifferenzenquotienten des rollenden Mittelwerts mit Fensterbreite 10 und dem Quadrat des Abstandes der Messtemperatur von der mittleren Temperatur. Hintergrund ist, dass die Netzwerke erst bei der Optimierung die mittere Temperatur finden und dann viel langsamer sich an den Kurvenverlauf anpassen um dies zu beschleuigen werden Tupel aus (Zeit,Temperatur) gewählt die von der Mittelwerttemperatur abweichen. Sodass der physikalische Loss gleichzeitig als Strafterm für die Optimierung auf die Mittelwerttemperatur genutzt wird. 
+Für den physikalischen Loss werden max(30, Batchgröße) Messpunkte aus dem ersten bis fünften Lauf zufällig ausgewählt. Aktuell wird eine Batchgröße von 64 gewählt. Die Wahrscheinlichkeit der Auswahl ist proprotional dem Quadrat des Differenzenquotienten des rollenden Mittelwerts mit Fensterbreite 10 und dem Quadrat des Abstandes der Messtemperatur von der mittleren Temperatur. Hintergrund ist, dass die Netzwerke erst bei der Optimierung die mittere Temperatur finden und dann viel langsamer sich an den Kurvenverlauf anpassen. Um dies zu Beschleuigen werden Tupel aus (Zeit,Temperatur) gewählt die von der Mittelwerttemperatur abweichen, sodass der physikalische Loss gleichzeitig als Strafterm für die Optimierung hin zur Mittelwerttemperatur genutzt wird. 
 Trainiert wird auf der ersten Hälfte des Datensatzes.
-Da der Loss für jeden Batch bestimmt wird, werden pro Batch der physikalische Loss, und der datengestüzte Loss berechnet. Daher ist ein Anpassungsfaktor des datengestützen Loss und des physikalischen Loss abhängig von der Batchgröße nötig. Deswegen ist die Größe des Testdatensatzes für den physikalischen Loss abhnägnig von der Batchgröße. Online eine Feinanpassung zu ermöglichen kann nützlich sein.
+Da der Loss für jeden Batch bestimmt wird, werden pro Batch der physikalische Loss, und der datengestüzte Loss berechnet. Daher ist ein Anpassungsfaktor des datengestützen Loss und des physikalischen Loss abhängig von der Batchgröße nötig. Deswegen ist die Größe des Testdatensatzes für den physikalischen Loss abhägnig von der Batchgröße. Online eine Feinanpassung zu ermöglichen kann nützlich sein.
 Es wurde ein Korrekturfaktor in die physikalischen Lossfunktionen eingebaut, der Erfahrungsgemäß die **Startwerte**  der physkalischen Lossfunktionen der MSE anpasst. Wegen zufälliger Initialisierung der Layerparameter, kann es zu leichten Abweichungen kommen.
-
 """
 
 # ╔═╡ 1a2337f0-bede-4d7d-8fdb-125406dbb703
@@ -210,7 +197,7 @@ plot(heating_df.global_duration,
 
 # ╔═╡ 2d6f1e50-4bfa-47fa-8ae2-728506db9b19
 md"""
-Es zeigt sich, dass die Optimierung beginnt mit dem Steigerung der vorhergesagten Temperatur auf die mittlere Temperatur während der Messung. Danach wird die Temperatur für jden einzelnen Lauf optimiert.
+Beim Vergleich von Ergebnissen nach unterschiedlichern Anzahl von Epochen zeigt sich, dass die Optimierung mit der Vorhergesage die mittlere Temperatur während der Messung beginnt. Danach wird die Temperatur für jeden Lauf nacheinander optimiert.
 
 ### Speichern des Modelles
 
@@ -228,8 +215,8 @@ md"""
 ## PINN - FOPDT
 ### Fitten des FOPDT
 
-Der physikalische Loss-Termin wird mittels [first order principle plud dead time (FOPDT)-Modell](https://apmonitor.com/pdc/index.php/Main/FirstOrderOptimization) erstellt, um die Faktoren τ ,Κ, θ zu bestimmen. 
-Da nur τ in die Abkühlung eingeht, wird der Term erst für die Abkühlung berechnet und dann, der Faktor τ in die Heizungsphase eingesetzt.
+Der physikalische Loss-Termin wird mittels [first order plus dead time (FOPDT)-Modell](https://apmonitor.com/pdc/index.php/Main/FirstOrderOptimization) erstellt, um die Faktoren τ ,Κ, θ zu bestimmen. 
+Da τ in die Abkühlung eingeh, Κ und θ hingegen nicht, wird der Term erst für die Abkühlung berechnet. Danach wird der Faktor τ in die Heizungsphase eingesetzt.
 
 Das ODE wird mit nlsove gelöst.
 Eingesetzt werden die Messwerte den ersten, 75ten und 130ten Messpunkt. 
@@ -405,7 +392,7 @@ end
 md"""
 ## PINN - Wärmefluss
 
-Anstelle des angefittenten FOPDT Models wird hier ein mechanistisches Model für das ODE verwendet. Das Model beschreibt das ODE aus dem [Wärmefluss](https://apmonitor.com/pdc/index.php/Main/ArduinoModeling) (heat transfer).
+Anstelle des angefittenten FOPDT Models wird hier ein mechanistisches Model für das ODE verwendet. Das Model beschreibt das ODE nach dem [Wärmefluss](https://apmonitor.com/pdc/index.php/Main/ArduinoModeling) (heat transfer).
 
 Die notwendigen physikalischen Parameter sind dem obigen Quelle entnommen.
 
@@ -534,14 +521,19 @@ r2(Tpred_nn, heating_df.T1)
 # ╔═╡ 28b8ec62-d9e8-49d3-aab8-efa90210c8bf
 md"""
 Sowohl mean squared error (mse), als auch mean absolut error (mae) zeigen die selbe Tendenz, dass die Vorhersage des PINN mit FOPDT eine höhere Abweichung von gemessenen Temperaturverlauf hat als die Vorsage des MLP.
+Bei jedem Model ist die Korrelation mit dem gemessen Temperaturverlauf gering.
+Das höchste r² liegt bei 0.244. Die bessten Ergebnisse werden vom MLP und den PINN-mit Wärmefluss-Modell erreicht.
 
-|Netz - physkalsicher Loss |  MSE   | MAE   | r²  |
-|:-------------------------| ------ | ----- | --- |
+Die Vorhersage des nODE mit Lux ist leicht besser als des PINN mit FOPDT.
+Während die Vorhersage des nODE mit Flux bei MSE, MAE und Bestimmtheitsmaß die größte Abweichung vom tatsächlichen Modell zeigt.
+
+|Netz - physkalischer Loss |  MSE   | MAE   |  r²  |
+|:-------------------------| ------ | ----- | ---- |
 | MLP                      | 262.48 | 13.18 | 0.208|
-|PINN - FODPT              |311.78  | 15.34 | 0.085|
-|PINN - Wärmefluss         |255.47  | 12.73 | 0.244|
-|nODE - Flux               |        |       |      |
-|nODE - Lux                |322.57  |15.25  |0.105 |
+|PINN - FODPT              | 311.78 | 15.34 | 0.085|
+|PINN - Wärmefluss         | 255.47 | 12.73 | 0.244|
+|nODE - Flux               | 313.23 | 15.54 | 0.053|
+|nODE - Lux                | 322.57 |15.25  | 0.105|
 """
 
 # ╔═╡ 70b759dc-b50a-41e9-a596-c71460781b6e
@@ -558,20 +550,31 @@ Folgende Anpassungen sind seit der dritten Forlesung erfolgt:
 - Anpassungen der Beispieldatensatzes für den physikalischen Loss
 - Größere Modellen 
 
-Bisher wurden als EingabeMatrix eine der Vorherige Temperaturwert und der aktuelle Prozentwert der Heizung eingeben. Dies wurde ersetzt durch die Zeit seit dem Start der Messung. Dies erschwerte die Anpassung, dieses ist allerdings noch möglich.
+Bisher wurden als Eingabematrix eine der vorherige Temperaturwert und der aktuelle Prozentwert der Heizung übergeben. Dies wurde ersetzt durch die Zeit seit dem Start der Messung. Dies erschwerte die Anpassung.
 
-Die Berechnung des Loss beim FOPDT-Modell wurde so angepasst, dass kein Lookup mehr notwenig ist, um die Rechenzeit zu kürzen.
+Die Berechnung des Loss beim FOPDT-Modell wurde so angepasst, dass kein Lookup mehr notwenig ist, was die Rechenzeit verkürzt.
 
-Da das bisherige Ergebnis nicht zufriedenstellend war, wurde neben dem FOPDT-Modell noch das Wärmefluss-Modell hinzugefügt ohne wesentliche/ deutliche Verbesserungen, gegenüber den klassischen MLP-Modells. Erst der Wechsel auf Minibatches führte zur erfolgreicher Optimierung mit der neuen Eingabematrix. Der aufgezeichnete Loss wird glatter, die Berechnung wird beschleunigt.
+Da das bisherige Ergebnis nicht zufriedenstellend war, wurde neben dem FOPDT-Modell noch das Wärmefluss-Modell hinzugefügt ohne deutliche Verbesserungen, gegenüber den klassischen MLP-Modells. Erst der Wechsel auf Minibatches führte zur erfolgreicher Optimierung mit der neuen Eingabematrix bei allen Modellen. Der aufgezeichnete Loss wird glatter, die Berechnung wird beschleunigt.
 
-Beides rührt daher, das nur noch eine Backpropagation pro Batch statt eine Backpropagation pro Messpunkt durchgeführt wird. Damit sinkt der zeitliche Rechenbedarf für die Backpropagation und gleichzeitig, wird die Backpropagation gemittelt über alle Messpunkte des Batches. Die Richtungen der Optimierungsschritte Streuen weniger. Je nach Implentierung können auch beim Minibatching weitere Rechenkerne im Feedforward eingesetzt werden, da diese Schritte innerhalb eines Batches unabhängig von einander sind.
+Beides rührt daher, das nur noch eine Backpropagation pro Batch statt eine Backpropagation pro Messpunkt durchgeführt wird. Damit sinkt der zeitliche Rechenbedarf für die Backpropagation und gleichzeitig, wird die Backpropagation gemittelt über alle Messpunkte des Batches. Die Richtungen der Optimierungsschritte streuen weniger. Je nach Implementierung können auch beim Minibatching weitere Rechenkerne im Feedforward eingesetzt werden, da diese Schritte innerhalb eines Batches unabhängig von einander sind.
 
-Obwohl aller Optimimerungen kann eine Verbessungerung des Lernens durch die Verwendung des PINNS nicht immer garantiert werden. Es zeigt sich für die verwendete Methodik, das der physikaische Loss bei FODPT viel starrer während der fortschreiteten Epochen bleibt. zwar bleibt der pyhsikalische Loss beim Wärmeflussmodell kaum verändert, lernt das Model geringfügig besser als das reine MLP.
+Trotz aller Optimimerungen kann eine Verbessungerung des Lernens durch die Verwendung des PINNS nicht immer garantiert werden. Es zeigt sich für die verwendete Methodik, das der physikaische Loss bei FODPT viel starrer während der fortschreiteten Epochen bleibt. Zwar bleibt der pyhsikalische Loss beim Wärmeflussmodell kaum verändert, dennoch lernt das Model oft geringfügig besser als das reine MLP.
+
+Der physikalische Loss wurde erst an Punkten bestimmt, wo die erste, zweite und dritte Ableitung im rollenden Mittel null wurde. Nach der Vorlesung wurden insbesondere zufällig Punkte proportional zum Absolutwert des rollenden Mittelwert der ersten Ableitung der Temperatur bestimmt, da die erste Ableitung die Sensitivtät des Signals vom Eingang beschreibt. Eine direkte Verbessung konnte nicht bestimmt werden. Der physikalische Loss wurde allerding nur für den ersten und fünften Lauf bestimmt. Danach wurde der Loss für den ersten bis einschließlich den fünften Lauf bestimmt. Dies hat keinen eindeutigen positiven Einfluss auf das Training. 
+
+Die erste Optimierung des Netzes ist die Findung der Mittelwert der Temperatur. Daher wurde als zweites Kriterium die Abweichung von dieser Temperatur zu gewählt, um so dass Modell zu unterstützen von der Mittelwerttemperatur abzuweichen. Dies hatte keinen Erfolg.
+
+Bei größeren Modellen wie zum Beispiel fünf Hiddenlayer mit je 32 Knoten. Lernt keines der Modelle mehr als die mittelere Temperatur.
+"""
+
+# ╔═╡ 796c53c1-ea69-4e12-bedf-0bf44f600d35
+md"""
+## Fazit für alle Modelle
 
 
-Der physikalische Loss wurde erst an Punkten bestimmt, wo die erste, zweite und dritte Ableitung im rollenden Mittel null wurde. Nach der Vorlesung wurden insbesondere Punkte zufällig aber Proportional zum Absolutwert des rollenden Mittelwert der ersten Ableitung der Temperatur bestimmt, da die erste Ableitung die Sensitivtät des Signals vom Eingang beschreibt. Eine direkte Verbessung konnte nicht bestimmt werden. Der physikalische Loss wurde allerding nur für den ersten und fünften Lauf bestimmt. Danach wurde der Loss für den ersten bis einschließlich den fünften Lauf bestimmt. Dies hat keinen eindeutigen positiven Einfluss auf das Training. Eine Verallgemeinung auf weitere noch nicht trainierte Heizzyklen gelingt weiterhin nicht  Die erste Optimierung des Netzes ist die Findung der Mittelwert der Temperatur. Daher wurde als zweites Kriterium die Abweichung von dieser Temperatur zu gewählt, um so dass Modell zu unterstützen von der Mittelwerttemperatur abzuweichen. Dies hatte keinen Erfolg.
+Eine Verallgemeinung auf weitere noch nicht trainierte Heizzyklen gelingt mit keinem der Modelle! 
+Die benötigten Rechenzeit sind beim PINN und nODE meist viel großer als beim reinen MLP. Dennoch ist die Vorhersage des MLP eine der Besten. Daher lohnt sich für das gegebene Problem der Heizkurve die Verwendung von PINN und nODE nicht.
 
-Bei Größeren Modellen wie zum Beispiel fünf Hiddenlayer mit je 32 Knoten. Lernt keines der Modelle mehr als die mittelere Temperatur.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -2606,9 +2609,8 @@ version = "1.4.1+0"
 # ╔═╡ Cell order:
 # ╟─d8760ed7-947f-4a3c-be31-08f67020e769
 # ╠═32ac2420-0ad8-11ee-2d6f-2d8c15a32168
-# ╠═8733e584-78c6-41c4-9f30-e86ada17fe8f
+# ╟─8733e584-78c6-41c4-9f30-e86ada17fe8f
 # ╟─993eda49-5f21-4368-94a6-4801f949a97b
-# ╠═5072d3c3-1963-4d3e-8b04-ec848d005996
 # ╠═ed1920f6-e175-4032-9f8b-eb26a49ea193
 # ╠═bf2bea30-98a5-47f4-aa2b-108e88eac174
 # ╠═12487f1f-4209-443f-945a-8c85a0191aac
@@ -2660,7 +2662,8 @@ version = "1.4.1+0"
 # ╠═57d66d4f-29cd-4c22-98ec-99541159cee8
 # ╠═e8ddfc47-b313-4a7c-b80d-a78734bac25d
 # ╠═ca5bb574-a73c-4c62-b9dc-a19f213cbc29
-# ╠═28b8ec62-d9e8-49d3-aab8-efa90210c8bf
+# ╟─28b8ec62-d9e8-49d3-aab8-efa90210c8bf
 # ╟─70b759dc-b50a-41e9-a596-c71460781b6e
+# ╟─796c53c1-ea69-4e12-bedf-0bf44f600d35
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002

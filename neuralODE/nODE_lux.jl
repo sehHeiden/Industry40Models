@@ -36,6 +36,11 @@ TableOfContents()
 # ╔═╡ a9fb8025-89c1-480b-bbc5-788346cdec1e
 celsius2kelvin(c) = c + 273.15
 
+# ╔═╡ a676029d-86a7-466a-962c-4fa5bf68c197
+md"""
+## Laden der Trainingsdaten
+"""
+
 # ╔═╡ f181bba2-0a77-452b-90d2-a887e10b3f12
 function prepare_dataframe(data_frame_path)
 
@@ -72,6 +77,11 @@ begin
 	heating_df = prepare_dataframe(heating_df_path);
 	heating_curves  =  heating_df |> Matrix;
 end
+
+# ╔═╡ 79887703-3474-44df-820a-914c8ce95069
+md"""
+##  Beschreibung des Models
+"""
 
 # ╔═╡ a8823a26-c3c2-4d1d-b9cb-ba2de612e874
 begin
@@ -224,30 +234,34 @@ r2(y_predict_after[2,:], ode_data[2,:])
 
 # ╔═╡ a731c2a3-7d2b-42b4-b94e-272ea037a9f0
 md"""
-Sowohl mean squared error (mse), als auch mean absolut error (mae) zeigen die selbe Tendenz, dass die Vorhersage des PINN mit FOPDT eine höhere Abweichung von gemessenen Temperaturverlauf hat als die Vorsage des MLP.
-Bei jedem Model ist die Korrelation mit dem gemessen Temperaturverlauf gering.
-Das höchste r² liegt bei 0.244. Die bessten Ergebnisse werden vom MLP und den PINN-mit Wärmefluss-Modell erreicht.
+Die Tendenzen von MSE und MAE der nODE implementiert in FLux und mit Lux unterschieden sich nur leicht. Größere Unterschiede existieren im Bestimmtheitsmaß. Dennoch liegt zwischen den Vorhersagen und den gemessenen Temperaturen am Sensor 1 nur eine sehr schwache korrellation vor. 
+
+
+Da der Temperaturunterschied zwischen der maximalen und minimalen Temperatur am Sensor 2 viel geringer ist als am Sensor 1, fallen MSE und MAE für diese Heizkurve viel geringer aus. Aber auch r² weißt für eine mittlere (Flux) bzw. starke (Lux) Korrelation zwischen der Vorhersage für Sensor 2 und der Messkuerve hin. Da der Kurvenverlauf für den ersten Heizyklus mit dem richtigen Verlauf erst steigt und dann sinkt, wobei der Unterschied zum Tatsächlichen Messwert weit geringer ist, als beim Sensor 1. Gerade in diesem Bereich ist die Übereinstimmung der Vorhesage des Lux-Modells laut Plots mit der gemessenen Kurven viel höher als beim Flux-Modell. 
+
 
 |Netz - physkalischer Loss |  MSE   | MAE   |  r²  |
 |:-------------------------| ------:| -----:| ----:|
-|nODE - Flux T1            |        |       |      |
-|nODE - Lux  T1            |322.57  |15.25  |0.105 |
-|nODE - Flux T2            |        |       |      |
-|nODE - Lux  T2            |81.48   |7.86   |0.565 |
+|nODE - Flux T1            |313.23  | 15.54 |0.053 |
+|nODE - Lux  T1            |322.57  | 15.25 |0.105 |
+|nODE - Flux T2            | 59.85  | 6.77  |0.140 |
+|nODE - Lux  T2            | 81.48  | 7.86  |0.565 |
 """
 
 # ╔═╡ 7c5cd03b-9811-40fc-8d5e-d59b8f6eccab
 md"""
-## Fazit
+## Änderungen und Fazit
+
+Die Implementation mittels Lux wurde erste nach der dritten Vorlesung angefertigt.
+Ein weiterer Unterschied ist die Verwendung der BFGS-Optimierers. Der Optimierer bricht aber bereits nach 10 Iterationen ab. 
 
 Lux im Vergleich zu Flux hat den wesentlichen Vorteil, dass die verwendeten Funktionen Immutable sind. Daher muss der Zustand/die aktuellen Parameter übergeben werden.
 Um dies zu Erreichen *muss* die Zufallsfunktion und derren Seed festgesetzt werden.
-Dies führt daber dazu, dass das Netz reproduzierbar, bei jedem Lauf, dass selbe Ergebnis erreicht.
+Dies führt daber dazu, dass das Netz reproduzierbar, bei jedem Lauf, dass selbe Ergebnis erreicht. Dies ist insbesondere bei einem Notebook von Vorteil, wo Zellen zum Teil in unteschiedlichen Reihenfolgen ausgefühlrt werden können.
 
 Die Optimierung mit BFGS-Optimierer bricht nach zehn Iterationen ab. Weshalb zusätzlich noch mit eine Optimierung mit Adam zum Abschluss forgeführt wird. 
-
-
-
+In wesentlich geringer Rechnenzeit wird dabei eine leicht genauere Vorhersage ermöglicht.
+Im weiteren müsste man hier nochmal genauer auf die Unterschiedlichen Optimierer Eingehen.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -2931,8 +2945,10 @@ version = "1.4.1+0"
 # ╠═4d27ecd4-1cd7-4e51-a56b-bcdd2caa8ecd
 # ╟─bfe370a8-3f44-4d4d-87ad-a8dbd3943c94
 # ╠═a9fb8025-89c1-480b-bbc5-788346cdec1e
+# ╟─a676029d-86a7-466a-962c-4fa5bf68c197
 # ╠═f181bba2-0a77-452b-90d2-a887e10b3f12
 # ╠═4ff257d2-1ed6-46be-8b46-5b4e328b7cab
+# ╟─79887703-3474-44df-820a-914c8ce95069
 # ╠═a8823a26-c3c2-4d1d-b9cb-ba2de612e874
 # ╠═f781ec07-fa3d-4b7d-9f44-66b6b9033c9e
 # ╠═445c6f56-2b91-4eb4-a02d-b8036e22341c

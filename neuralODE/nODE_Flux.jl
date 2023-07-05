@@ -19,33 +19,31 @@ begin
 	using JLD2
 end
 
+# ╔═╡ 3eff83a6-f4e2-4ffe-a093-364a7cc151c1
+using Statistics
+
 # ╔═╡ 535fd607-443c-487d-90b5-e187812ba6ce
 md""""
 # Training neural ODE mit Flux
 
-Neurales ODE in Anlehnung an eine einfache differentielle Gleichung (ODE).
-Wobei die differenzelle Änderungen in einem System beschreibt. Durch Eingabe der
-Startwerte kann so der tatsächliche Graph abgebildert werden.
-Anstelle eines Solvers, wo einzelne Parameter des ODE angepasst werden, soll ein neurales Netzwerk trainiert werden, dass die ODE abbildet.
+Neurales ODE (ODE - einfache differentielle Gleichung) beschreibt eine Methode des Deep Learning in der neurale Netzwerke, dass die ODE, oder Teile davon abbildet.
 
-Training eines NN (Dense).
+Das Gegenstück aus der Warte eines ODE, sind Solver mit den einzelne Parameter des ODE angepasst werden. Zusätlich existieren hybride Methoden,  
+
+Trainiert wird ein Multilayerperzeptron (MLP) mit den Schichten
  1) 2->32, Aktivierungsfunktion tanh,
  2) 32->2, Aktivierungsfunktion linear.
 
-Eingabe in das Training: Zeitpunkte zu denen Gemessene Punkte mit trainierten verglichen werden sollen.
+Eingabe in das Training: Zeitpunkte zu denen gemessene Temperaturen mit trainierten verglichen werden sollen.
 
-
-Die zwei Knoten in Eingabe und Ausgabe Layer entsprechen den Temperaturen an den 
-gegeben Temperatursensoren des tclab, während die erste Heizquelle zyklisch aufgeheizt wird.
+Die zwei Knoten in den Eingabe- und Ausgabe-Layern entsprechen den Temperaturen an den Temperatursensoren des tclab, während die Heizquelle Nahe des ersten Temperatursensors zyklisch aufgeheizt wird.
 Das heißt, beide Sensoren werden zyklisch erhitzt. Sensor 1, stärker als Sensor 2.
 Sensor 2 ist im Aufheizen und Abkühlen im Vergleich zu Sensor 1 leicht verzögert.
-
 
 Es soll ein neurales ODE mit dem Netzwerk angelernt werden. 
 Das Netz soll die Änderungen des Verlauf des Temperaturen Vorhersagen.
 
 Für die Vorhersage wird daher die Starttemperatur benötigt.
-
 """
 
 # ╔═╡ 7c16f638-efe6-46a9-920a-fd183ebe82f2
@@ -169,13 +167,13 @@ end
 
 # ╔═╡ 3695e008-b153-4eb3-b5c8-c109dec54c0f
 md"""
-### Saving the Model
+### Abspeichern des Models
 """
 
 # ╔═╡ c55f7162-a11e-4df0-beac-cf7f21d88a2d
 begin
 	model_state = Flux.state(n_ode);
-	jldsave("nODE_model.jld2"; n_ode)
+	jldsave("nODE_Flux_model.jld2"; n_ode)
 end
 
 # ╔═╡ cbfc451f-1c35-437f-a25c-f05fe964836f
@@ -184,10 +182,21 @@ md"""
 """
 
 # ╔═╡ 528cf461-ce9d-4c74-be34-45434f7d842d
+r2(y_hat, y) = sum(abs2, y_hat .- mean(y)) / sum(abs2, y .- mean(y))
 
+# ╔═╡ 31c2734a-c7d4-4f08-9e7b-9b159f232b51
+Flux.mse(y_predict_after[1,:], ode_data[1]), 
+Flux.mae(y_predict_after[1,:], ode_data[1]),
+r2(y_predict_after[1,:], ode_data[1])
+
+# ╔═╡ bd02dcad-fa60-4ae5-8bec-729fa619a864
+Flux.mse(y_predict_after[2,:], ode_data[2]),
+Flux.mae(y_predict_after[2,:], ode_data[2]),
+r2(y_predict_after[2,:], ode_data[2])
 
 # ╔═╡ 40bf3253-a279-4b09-b0db-afb7d9247478
 md"""
+Die Auswertung und der Vergleich erfolgt im Workbook: **nODE mit Lux**.  
 """
 
 # ╔═╡ d1874dc6-a3f8-47fc-98a6-e43848101c21
@@ -233,7 +242,7 @@ Desweiteren wurde getestet, ob mehr Heizzyklen als Beispiel in das Training übe
 
 ### Optimierung des Aufgezeichneten Loss
 
-Die Funktion aufgezeichnete Loss war zum Teil sehr rauch. Es wurde vermutet, dieses dies insbesondere, dass weitere lernen verhindert. Deswegen unterschiedliche Schritte mit unterschiedlichen Lernraten getestet. Niedrige Lernraten führten zwar zur klatteren Kurven, aber nicht zur besseren Optimierungen. 
+Die Funktion aufgezeichnete Loss war zum Teil sehr rauch. Es wurde vermutet, dieses dies insbesondere, dass weitere Lernen verhindert. Deswegen wurden unterschiedliche Epochenanzhalen  mit unterschiedlichen Lernraten getestet. Niedrige Lernraten führten zwar zur klatteren Kurven, aber nicht zur besseren Optimierungen. 
 
 ### Variation der Hiddenlayer und Anzahl der Knoten
 
@@ -258,6 +267,7 @@ JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [compat]
 BenchmarkTools = "~1.3.2"
@@ -278,7 +288,7 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.9.1"
 manifest_format = "2.0"
-project_hash = "6c3cbccc888a95fbab86cfb82db2ed88436e35a0"
+project_hash = "8a850b93a4685d93d9d5975e453210fdbced3979"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "dcfdf328328f2645531c4ddebf841228aef74130"
@@ -2646,8 +2656,11 @@ version = "1.4.1+0"
 # ╟─3695e008-b153-4eb3-b5c8-c109dec54c0f
 # ╠═c55f7162-a11e-4df0-beac-cf7f21d88a2d
 # ╟─cbfc451f-1c35-437f-a25c-f05fe964836f
+# ╠═3eff83a6-f4e2-4ffe-a093-364a7cc151c1
 # ╠═528cf461-ce9d-4c74-be34-45434f7d842d
-# ╠═40bf3253-a279-4b09-b0db-afb7d9247478
+# ╠═31c2734a-c7d4-4f08-9e7b-9b159f232b51
+# ╠═bd02dcad-fa60-4ae5-8bec-729fa619a864
+# ╟─40bf3253-a279-4b09-b0db-afb7d9247478
 # ╟─d1874dc6-a3f8-47fc-98a6-e43848101c21
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002

@@ -6,6 +6,10 @@ Es wurden zwölf Heizyklen durchgeführt bei dem an der Wärmequelle Q1 zu 100 %
 
 Zwischen zwei Messpunkten liegen 1,1 bis 1,3 Sekunden. Diese Zeit setzt sich aus Messzeit, und Wartezeit von einer Sekunde zusammen. 
 
+Der Temperatursensor hat einen typischen Messfehler von 1 K und einen maximalen Fehler von 3 K. Der höchste gemessene Temperaturanstieg war 1.6 Kelvin pro Sekunde, der höchste Abfall - 2.5 Kelvin pro Sekunde.
+
+
+
 Für jeden Messpunkt werden notiert: 
 
 - Temperatur am Sensor 1
@@ -18,12 +22,10 @@ Für jeden Messpunkt werden notiert:
 
 - Heizzyklus
 
- 
+Die Pluto-Notebooks/ bzw. daraus erstellte pdf-Dokumente bauen sehr loose auf einander auf:
 
-Die Dokumente bauen sehr loose auf einander auf.
+1) [nODE mit Flux](neuralODE/nODE_Flux—Pluto_Sebastian_Heiden.pdf)
 
-1) [nODE mit Flux](./nODE_Flux—Pluto_Sebastian_Heiden.pdf)
+2) [nODE mit Lux](neuralODE/nODE_Lux—Pluto_Sebastian_Heiden.pdf)
 
-2) [nODE mit Lux]()
-
-3) [PINN](./PINN—Pluto_Sebastian_Heiden.pdf)
+3) [PINN](PINN/PINN—Pluto_Sebastian_Heiden.pdf)
