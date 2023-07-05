@@ -23,13 +23,13 @@ md"""
 # Physically Informed Neural Network (PINN)
 """
 
+# ╔═╡ 8733e584-78c6-41c4-9f30-e86ada17fe8f
+TableOfContents()
+
 # ╔═╡ 993eda49-5f21-4368-94a6-4801f949a97b
 md"""
 ##  Laden und Aufbereitung der Messdaten.
 """
-
-# ╔═╡ 8733e584-78c6-41c4-9f30-e86ada17fe8f
-TableOfContents()
 
 # ╔═╡ 5072d3c3-1963-4d3e-8b04-ec848d005996
 begin
@@ -87,13 +87,14 @@ Anzeige des Verlaufes der Heizkurven.
 Die Messpunkte werden wurden alle 1.1 s bis 1.3 s genommen (Dauer des Messens, Ablagen +  1 s). Zeitpunkte sind als Timestamps abgespeichert, die Temperatur wird gemessen in °C und Kelvin umgewandelt.
 
 Der Temperatursensor hat einen typischen Messfehler von 1 K und einen maximalen Fehler von 3 K.
-Der höchste gemessene Temperaturanstieg war 1.6 Kelvin pro Sekunde, der Höchste Abfall -2.4 Kelivin pro Sekunde.
+Der höchste gemessene Temperaturanstieg war 1.6 Kelvin pro Sekunde, der höchste Abfall - 2.5 Kelvin pro Sekunde.
 Aktuell wird eine Batchgröße von 64 gewählt.
 
-Für den physikalischen Loss werden max(30, Batchgröße) Messpunkte aus dem ersten und fünften Lauf zufällig ausgewählt. Die Wahrscheinlichkeit der Auswahl ist proprotional Differenzenquotienten des rollenden Mittelwerts mit Fensterbreite 10. 
-Trainiert wird auf der ersten Hälfte des Datensatzes. Daher wird der physikalische Loss verstärkt am Ende und Anfang der Zeitskala berechnet.
+Für den physikalischen Loss werden max(30, Batchgröße) Messpunkte aus dem ersten bis fünften Lauf zufällig ausgewählt. Die Wahrscheinlichkeit der Auswahl ist proprotional dem quadrat desDifferenzenquotienten des rollenden Mittelwerts mit Fensterbreite 10 und dem Quadrat des Abstandes der Messtemperatur von der mittleren Temperatur. Hintergrund ist, dass die Netzwerke erst bei der Optimierung die mittere Temperatur finden und dann viel langsamer sich an den Kurvenverlauf anpassen um dies zu beschleuigen werden Tupel aus (Zeit,Temperatur) gewählt die von der Mittelwerttemperatur abweichen. Sodass der physikalische Loss gleichzeitig als Strafterm für die Optimierung auf die Mittelwerttemperatur genutzt wird. 
+Trainiert wird auf der ersten Hälfte des Datensatzes.
 Da der Loss für jeden Batch bestimmt wird, werden pro Batch der physikalische Loss, und der datengestüzte Loss berechnet. Daher ist ein Anpassungsfaktor des datengestützen Loss und des physikalischen Loss abhängig von der Batchgröße nötig. Deswegen ist die Größe des Testdatensatzes für den physikalischen Loss abhnägnig von der Batchgröße. Online eine Feinanpassung zu ermöglichen kann nützlich sein.
 Es wurde ein Korrekturfaktor in die physikalischen Lossfunktionen eingebaut, der Erfahrungsgemäß die **Startwerte**  der physkalischen Lossfunktionen der MSE anpasst. Wegen zufälliger Initialisierung der Layerparameter, kann es zu leichten Abweichungen kommen.
+
 """
 
 # ╔═╡ 1a2337f0-bede-4d7d-8fdb-125406dbb703
@@ -138,7 +139,7 @@ begin
 
 	t =  heating_df.run .∈ Ref([1, 2, 3, 4, 5])
 	dT₁ = heating_df.T1[t] |> (y -> runmean(y, 10)) |> diff |> (y -> prepend!([0.0, ], y))
-	rowsΔ = StatsBase.sample(heating_df.Column1[t], Weights(abs.(dT₁)), maximum([30, batchsize]))
+	rowsΔ = StatsBase.sample(heating_df.Column1[t], Weights(abs2.(dT₁) .* abs2.(heating_df.T1[t] .- mean(heating_df.T1[t]))), maximum([30, batchsize]))
 	T1Δ = heating_df.T1[rowsΔ]
 	tΔ = heating_df.global_duration[rowsΔ]
 
@@ -385,7 +386,7 @@ begin
 		xlabel = "Time ∖s", 
 		ylabel = "T  ∖K",
 		label = ["Heizkurve" "Vorhersage MLP" "Vorhersage PINN-FOPDT"],
-		title = "Heizkruven", 
+		title = "Heizkurven", 
 		lw = [5 2 2])
 end
 
@@ -478,7 +479,7 @@ plot(1:epochs,
 	ylabel = "Log₁₀ Loss", 
 	la=[0.5 1 1], 
 	lc=[:red :blue :aqua :cyan],
-	label=["MSE" "Physical" "Total"])
+	label=["PINN-MSE" "PINN-Physical" "PINN-Total"])
 
 
 # ╔═╡ 015c0f04-85fb-4c2a-82ce-db0ddc848f17
@@ -493,7 +494,7 @@ begin
 		ylabel = "T  ∖K",
 		label = ["Heizkurve" "Vorhersage MLP" "Vorhersage PINN-FOPDT" "Vorhersage PINN-Wärmefluss"],
 		title = "Vollständige Heizkurven", 
-		lw = [5 2 2 4])
+		lw = [5 2 2 3])
 end
 
 # ╔═╡ 1db1f070-fb98-4bb6-ab39-4e9e8e1a86cb
@@ -507,6 +508,42 @@ begin
 	jldsave("pinn_transfer_model.jld2"; pinn_transfer_state)
 end
 
+# ╔═╡ d9300313-556c-4219-98ba-09ee0ba4db89
+md"""
+## Metriken
+"""
+
+# ╔═╡ 745e2842-2b51-4dd0-ab08-b4d3a4cd4cb2
+r2(y_hat, y) = sum(abs2, y_hat .- mean(y)) / sum(abs2, y .- mean(y))
+
+# ╔═╡ 57d66d4f-29cd-4c22-98ec-99541159cee8
+Flux.mse(Tpred_transfer, heating_df.T1), 
+Flux.mae(Tpred_transfer, heating_df.T1),
+r2(Tpred_transfer, heating_df.T1)
+
+# ╔═╡ e8ddfc47-b313-4a7c-b80d-a78734bac25d
+Flux.mse(Tpred_fopdt, heating_df.T1),
+Flux.mae(Tpred_fopdt, heating_df.T1),
+r2(Tpred_fopdt, heating_df.T1)
+
+# ╔═╡ ca5bb574-a73c-4c62-b9dc-a19f213cbc29
+Flux.mse(Tpred_nn, heating_df.T1), 
+Flux.mae(Tpred_nn, heating_df.T1),
+r2(Tpred_nn, heating_df.T1)
+
+# ╔═╡ 28b8ec62-d9e8-49d3-aab8-efa90210c8bf
+md"""
+Sowohl mean squared error (mse), als auch mean absolut error (mae) zeigen die selbe Tendenz, dass die Vorhersage des PINN mit FOPDT eine höhere Abweichung von gemessenen Temperaturverlauf hat als die Vorsage des MLP.
+
+|Netz - physkalsicher Loss |  MSE   | MAE   | r²  |
+|:-------------------------| ------ | ----- | --- |
+| MLP                      | 262.48 | 13.18 | 0.208|
+|PINN - FODPT              |311.78  | 15.34 | 0.085|
+|PINN - Wärmefluss         |255.47  | 12.73 | 0.244|
+|nODE - Flux               |        |       |      |
+|nODE - Lux                |322.57  |15.25  |0.105 |
+"""
+
 # ╔═╡ 70b759dc-b50a-41e9-a596-c71460781b6e
 md"""
 
@@ -519,6 +556,7 @@ Folgende Anpassungen sind seit der dritten Forlesung erfolgt:
 - Einführung des Models mit Wärmefluss
 - Einbau von Mini-Batches
 - Anpassungen der Beispieldatensatzes für den physikalischen Loss
+- Größere Modellen 
 
 Bisher wurden als EingabeMatrix eine der Vorherige Temperaturwert und der aktuelle Prozentwert der Heizung eingeben. Dies wurde ersetzt durch die Zeit seit dem Start der Messung. Dies erschwerte die Anpassung, dieses ist allerdings noch möglich.
 
@@ -531,7 +569,9 @@ Beides rührt daher, das nur noch eine Backpropagation pro Batch statt eine Back
 Obwohl aller Optimimerungen kann eine Verbessungerung des Lernens durch die Verwendung des PINNS nicht immer garantiert werden. Es zeigt sich für die verwendete Methodik, das der physikaische Loss bei FODPT viel starrer während der fortschreiteten Epochen bleibt. zwar bleibt der pyhsikalische Loss beim Wärmeflussmodell kaum verändert, lernt das Model geringfügig besser als das reine MLP.
 
 
-Der physikalische Loss wurde erst an Punkten bestimmt, wo die erste, zweite und dritte Ableitung im rollenden Mittel null wurde. Nach der Vorlesung wurden insbesondere Punkte zufällig aber Proportional zum Absolutwert des rollenden Mittelwert der ersten Ableitung der Temperatur bestimmt, da die erste Ableitung die Sensitivtät des Signals vom Eingang beschreibt. Eine direkte Verbessung konnte nicht bestimmt werden. Der physikalische Loss wurde allerding nur für den ersten und fünften Lauf bestimmt. Danach wurde der Loss für den ersten bis einschließlich den fünften Lauf bestimmt. Der die erste Optimierung des Netzes, die Findung der Mittelwert der Temperatur ist, wäre es ratsam als zweites Kritterium die Abweichung von dieser Temperatur zu wählen, um so dass Modell zu unterstützen von der Mittelwerttemperatur abzuweichen.
+Der physikalische Loss wurde erst an Punkten bestimmt, wo die erste, zweite und dritte Ableitung im rollenden Mittel null wurde. Nach der Vorlesung wurden insbesondere Punkte zufällig aber Proportional zum Absolutwert des rollenden Mittelwert der ersten Ableitung der Temperatur bestimmt, da die erste Ableitung die Sensitivtät des Signals vom Eingang beschreibt. Eine direkte Verbessung konnte nicht bestimmt werden. Der physikalische Loss wurde allerding nur für den ersten und fünften Lauf bestimmt. Danach wurde der Loss für den ersten bis einschließlich den fünften Lauf bestimmt. Dies hat keinen eindeutigen positiven Einfluss auf das Training. Eine Verallgemeinung auf weitere noch nicht trainierte Heizzyklen gelingt weiterhin nicht  Die erste Optimierung des Netzes ist die Findung der Mittelwert der Temperatur. Daher wurde als zweites Kriterium die Abweichung von dieser Temperatur zu gewählt, um so dass Modell zu unterstützen von der Mittelwerttemperatur abzuweichen. Dies hatte keinen Erfolg.
+
+Bei Größeren Modellen wie zum Beispiel fünf Hiddenlayer mit je 32 Knoten. Lernt keines der Modelle mehr als die mittelere Temperatur.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -2566,8 +2606,8 @@ version = "1.4.1+0"
 # ╔═╡ Cell order:
 # ╟─d8760ed7-947f-4a3c-be31-08f67020e769
 # ╠═32ac2420-0ad8-11ee-2d6f-2d8c15a32168
-# ╟─993eda49-5f21-4368-94a6-4801f949a97b
 # ╠═8733e584-78c6-41c4-9f30-e86ada17fe8f
+# ╟─993eda49-5f21-4368-94a6-4801f949a97b
 # ╠═5072d3c3-1963-4d3e-8b04-ec848d005996
 # ╠═ed1920f6-e175-4032-9f8b-eb26a49ea193
 # ╠═bf2bea30-98a5-47f4-aa2b-108e88eac174
@@ -2615,6 +2655,12 @@ version = "1.4.1+0"
 # ╠═4d7ac675-5bad-464b-affa-b3096e8342d8
 # ╟─1db1f070-fb98-4bb6-ab39-4e9e8e1a86cb
 # ╠═ba050844-0b6c-4fc5-b3c3-89548127679a
+# ╠═d9300313-556c-4219-98ba-09ee0ba4db89
+# ╠═745e2842-2b51-4dd0-ab08-b4d3a4cd4cb2
+# ╠═57d66d4f-29cd-4c22-98ec-99541159cee8
+# ╠═e8ddfc47-b313-4a7c-b80d-a78734bac25d
+# ╠═ca5bb574-a73c-4c62-b9dc-a19f213cbc29
+# ╠═28b8ec62-d9e8-49d3-aab8-efa90210c8bf
 # ╟─70b759dc-b50a-41e9-a596-c71460781b6e
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
